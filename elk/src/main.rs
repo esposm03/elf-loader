@@ -1,7 +1,11 @@
-use std::{fs, io::Write, process::{Command, Stdio}};
+use std::{
+    fs,
+    io::Write,
+    process::{Command, Stdio},
+};
 
 use mmap::{MapOption, MemoryMap};
-use region::{Protection, protect};
+use region::{protect, Protection};
 
 fn main() {
     let input_path = std::env::args().nth(1).expect("Usage: elk <path>");
@@ -24,30 +28,32 @@ fn main() {
     // we'll need to hold onto our "mmap::MemoryMap", because dropping them
     // unmaps them!
     let mut mappings = Vec::new();
+    let base = 0x400000;
+    let addr = 0x1000;
+    println!("{:X} + {:X} = {:X}", addr, base, addr+base);
 
     // we're only interested in "Load" segments
     for ph in file
         .program_headers
         .iter()
         .filter(|ph| ph.r#type == delf::SegmentType::Load)
+        .filter(|ph| !ph.mem_range().is_empty())
     {
-        println!("Mapping segment @ {:?} with {:?}", ph.mem_range(), ph.flags);
-        // note: mmap-ing would fail if the segments weren't aligned on pages,
-        // but luckily, that is the case in the file already. That is not a coincidence.
+        println!("Mapping segment @ virt {:?}, adjusted {:X}..{:X}, flags {:?}", ph.mem_range(), ph.mem_range().start.0 + base, ph.mem_range().end.0 + base, ph.flags);
         let mem_range = ph.mem_range();
         let len: usize = (mem_range.end - mem_range.start).into();
-        // `as` is the "cast" operator, and `_` is a placeholder to force rustc
-        // to infer the type based on other hints (here, the left-hand-side declaration)
-        let addr: *mut u8 = mem_range.start.0 as _;
-        // at first, we want the memory area to be writable, so we can copy to it.
-        // we'll set the right permissions later
+
+        let start = mem_range.start.0 + base;
+        let aligned_start = align_lo(start);
+        let padding = start - aligned_start;
+        let len = len + padding as usize;
+
+        let addr = aligned_start as *mut u8;
         let map = MemoryMap::new(len, &[MapOption::MapWritable, MapOption::MapAddr(addr)]).unwrap();
 
         println!("Copying segment data...");
-        {
-            let dst = unsafe { std::slice::from_raw_parts_mut(addr, ph.data.len()) };
-            dst.copy_from_slice(&ph.data[..]);
-        }
+        unsafe { std::slice::from_raw_parts_mut(addr, ph.data.len()) }
+            .copy_from_slice(&ph.data[..]);
 
         println!("Adjusting permissions...");
         let mut protection = Protection::NONE;
@@ -64,9 +70,11 @@ fn main() {
         mappings.push(map);
     }
 
-    println!("Jumping to entry point @ {:?}...", file.entry_point);
+    println!("u64: {:X}, *const u8: {:X?}", file.entry_point.0 + base as u64, (file.entry_point.0 + base as u64) as *const u8);
+    let to_jmp = (file.entry_point.0 + base as u64) as *const u8;
+    println!("Jumping to entry point @ {:?}...", to_jmp);
     unsafe {
-        jmp(file.entry_point.0 as _);
+        jmp(to_jmp);
     }
 }
 
@@ -98,4 +106,9 @@ pub fn ndisasm(code: &[u8], origin: delf::Addr) {
     let output = child.wait_with_output().unwrap();
 
     println!("{}", String::from_utf8_lossy(&output.stdout));
+}
+
+/// Truncates a usize value to the left-adjacent (low) 4KiB boundary.
+fn align_lo(x: u64) -> u64 {
+    x & !0xFFF
 }

@@ -1,10 +1,19 @@
-use std::{fmt, ops::Range};
 use std::convert::TryFrom;
+use std::{fmt, ops::Range};
 
-use nom::{Err::{Failure, Error}, Offset, branch::alt, bytes::complete::{tag, take}, combinator::{map, verify}, error::context, number::complete::{le_u16, le_u32, le_u64}, sequence::tuple};
-use derive_try_from_primitive::TryFromPrimitive;
 use derive_more::*;
-use enumflags2::{BitFlags, bitflags};
+use derive_try_from_primitive::TryFromPrimitive;
+use enumflags2::{bitflags, BitFlags};
+use nom::{
+    branch::alt,
+    bytes::complete::{tag, take},
+    combinator::{map, verify},
+    error::context,
+    number::complete::{le_u16, le_u32, le_u64},
+    sequence::tuple,
+    Err::{Error, Failure},
+    Offset,
+};
 
 pub type Input<'a> = &'a [u8];
 pub type ParseResult<'a, O> = nom::IResult<Input<'a>, O, nom::error::VerboseError<Input<'a>>>;
@@ -70,7 +79,7 @@ impl File {
             context("Class not 64bit", tag(&[0x2])),
             context("Endianness not little", tag(&[0x1])),
             context("Version not 1", tag(&[0x1])),
-            context("OS ABI not sysv/linux", alt(( tag(&[0x0]), tag(&[0x3]) ))),
+            context("OS ABI not sysv/linux", alt((tag(&[0x0]), tag(&[0x3])))),
             context("Padding", take(8usize)),
         ))(i)?;
 
@@ -97,7 +106,12 @@ impl File {
             program_headers.push(ph);
         }
 
-        let res = Self { typ, machine, entry_point, program_headers };
+        let res = Self {
+            typ,
+            machine,
+            entry_point,
+            program_headers,
+        };
         Ok((i, res))
     }
 
@@ -172,17 +186,21 @@ impl fmt::Debug for ProgramHeader {
             self.file_range(),
             self.mem_range(),
             self.align,
-            &[(SegmentFlag::Read, "R"), (SegmentFlag::Write, "W"), (SegmentFlag::Execute, "X")]
-                .iter()
-                .map(|&(flag, letter)| {
-                    if self.flags.contains(flag) {
-                        letter
-                    } else {
-                        "."
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(""),
+            &[
+                (SegmentFlag::Read, "R"),
+                (SegmentFlag::Write, "W"),
+                (SegmentFlag::Execute, "X")
+            ]
+            .iter()
+            .map(|&(flag, letter)| {
+                if self.flags.contains(flag) {
+                    letter
+                } else {
+                    "."
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(""),
             self.r#type,
         )
     }
