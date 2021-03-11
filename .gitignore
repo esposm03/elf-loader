@@ -1,2 +1,7 @@
 **/target
 Cargo.lock
+
+elk/samples/nodata
+elk/samples/entry_point
+elk/samples/hello-pie
+elk/samples/hello-mov-pie

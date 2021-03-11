@@ -1,11 +1,9 @@
-        default rel
-
         global _start
 
         section .text
 
 _start: mov rdi, 1      ; stdout fd
-        lea rsi, [rel msg]
+        mov rsi, msg
         mov rdx, 9      ; 8 chars + newline
         mov rax, 1      ; write syscall
         syscall
