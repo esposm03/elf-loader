@@ -1,3 +1,6 @@
+pub mod components;
+use components::segment::{DynamicEntry, DynamicTag, SegmentContents, SegmentType};
+
 use std::convert::TryFrom;
 use std::{fmt, ops::Range};
 
@@ -5,14 +8,17 @@ use derive_more::*;
 use derive_try_from_primitive::TryFromPrimitive;
 use enumflags2::{bitflags, BitFlags};
 use nom::{
+    Err::{Error, Failure},
+    Offset,
+};
+use nom::{
     branch::alt,
     bytes::complete::{tag, take},
     combinator::{map, verify},
     error::context,
+    multi::many_m_n,
     number::complete::{le_u16, le_u32, le_u64},
     sequence::tuple,
-    Err::{Error, Failure},
-    Offset,
 };
 
 pub type Input<'a> = &'a [u8];
@@ -58,7 +64,7 @@ macro_rules! impl_parse_for_enumflags {
 
 #[derive(Debug)]
 pub struct File {
-    pub typ: Type,
+    pub typ: ElfType,
     pub machine: Machine,
     pub entry_point: Addr,
     pub program_headers: Vec<ProgramHeader>,
@@ -83,7 +89,7 @@ impl File {
             context("Padding", take(8usize)),
         ))(i)?;
 
-        let (i, typ) = Type::parse(i)?;
+        let (i, typ) = ElfType::parse(i)?;
         let (i, machine) = Machine::parse(i)?;
         let (i, _) = context("Version (bis)", verify(le_u32, |&x| x == 1))(i)?;
         let (i, entry_point) = Addr::parse(i)?;
@@ -122,7 +128,7 @@ impl File {
                 eprintln!("Parsing failed: ");
                 for (input, err) in err.errors {
                     let offset = i.offset(input);
-                    eprintln!("{:?} at position {}:", err, offset);
+                    eprintln!("{:?} at position {:x}:", err, offset);
                     eprintln!("{:>08x}: {:?}", offset, HexDump(input));
                 }
                 None
@@ -142,6 +148,8 @@ pub struct ProgramHeader {
     pub memsz: Addr,
     pub align: Addr,
     pub data: Vec<u8>,
+
+    pub contents: SegmentContents,
 }
 
 impl ProgramHeader {
@@ -152,7 +160,7 @@ impl ProgramHeader {
         self.vaddr..self.vaddr + self.memsz
     }
 
-    fn parse<'a>(full_input: Input<'_>, i: Input<'a>) -> ParseResult<'a, Self> {
+    fn parse<'a>(full_input: Input<'a>, i: Input<'a>) -> ParseResult<'a, Self> {
         let (i, r#type) = SegmentType::parse(i)?;
         let (i, flags): _ = SegmentFlag::parse(i)?;
 
@@ -163,6 +171,19 @@ impl ProgramHeader {
         let (i, memsz) = Addr::parse(i)?;
         let (i, align) = Addr::parse(i)?;
 
+        let slice = &full_input[offset.into()..][..filesz.into()];
+        let (_, contents) = match r#type {
+            SegmentType::Dynamic => {
+                let entry_size: usize = 16;
+                let n = slice.len()/entry_size;
+                map(
+                    many_m_n(n, n, DynamicEntry::parse),
+                    SegmentContents::Dynamic,
+                )(slice)?
+            }
+            _ => (slice, SegmentContents::Unknown),
+        };
+
         let res = Self {
             r#type,
             flags,
@@ -172,7 +193,8 @@ impl ProgramHeader {
             filesz,
             memsz,
             align,
-            data: full_input[offset.into()..][..filesz.into()].to_vec(),
+            data: slice.to_vec(),
+            contents,
         };
         Ok((i, res))
     }
@@ -208,7 +230,7 @@ impl fmt::Debug for ProgramHeader {
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive)]
-pub enum Type {
+pub enum ElfType {
     None = 0x0,
     Rel = 0x1,
     Exec = 0x2,
@@ -223,26 +245,6 @@ pub enum Machine {
     X86_64 = 0x3E,
 }
 
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
-pub enum SegmentType {
-    Null = 0x0,
-    Load = 0x1,
-    Dynamic = 0x2,
-    Interp = 0x3,
-    Note = 0x4,
-    ShLib = 0x5,
-    PHdr = 0x6,
-    TLS = 0x7,
-    LoOS = 0x6000_0000,
-    HiOS = 0x6FFF_FFFF,
-    LoProc = 0x7000_0000,
-    HiProc = 0x7FFF_FFFF,
-    GnuEhFrame = 0x6474_E550,
-    GnuStack = 0x6474_E551,
-    GnuRelRo = 0x6474_E552,
-    GnuProperty = 0x6474_E553,
-}
 
 #[bitflags]
 #[repr(u32)]
@@ -253,8 +255,9 @@ pub enum SegmentFlag {
     Read = 0x4,
 }
 
-impl_parse_for_enum!(Type, le_u16);
+impl_parse_for_enum!(ElfType, le_u16);
 impl_parse_for_enum!(Machine, le_u16);
+impl_parse_for_enum!(DynamicTag, le_u64);
 impl_parse_for_enum!(SegmentType, le_u32);
 
 impl_parse_for_enumflags!(SegmentFlag, le_u32);

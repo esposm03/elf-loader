@@ -4,17 +4,40 @@ use std::{
     process::{Command, Stdio},
 };
 
+use delf::components::segment::{SegmentContents, SegmentType};
 use mmap::{MapOption, MemoryMap};
 use region::{protect, Protection};
 
 fn main() {
+    // General steps:
+    // - load and parse the Elf file
+    // - Map every segment that is `Load` to the right place in memory
+    // - Set the correct memory protection for each mapping
+    // - For each segment, copy its data from the file to memory
+    // - Jump to the entry point
+
     let input_path = std::env::args().nth(1).expect("Usage: elk <path>");
     let content = fs::read(&input_path).expect("Failed to read file");
 
     println!("Analysing...");
     let file = delf::File::parse_or_print_error(&content).expect("Failed to parse file");
-    println!("{:#?}", file);
+    println!("Entry point: {:X}", file.entry_point.0);
+    println!("Program Headers: {:#?}", file.program_headers);
 
+    println!("Dynamic entries:");
+    if let Some(ds) = file
+        .program_headers
+        .iter()
+        .find(|ph| ph.r#type == SegmentType::Dynamic)
+    {
+        if let SegmentContents::Dynamic(ref table) = ds.contents {
+            for entry in table {
+                println!("- {:?}", entry);
+            }
+        }
+    }
+
+    println!();
     println!("Disassembling...");
     let code_ph = file
         .program_headers
@@ -23,23 +46,19 @@ fn main() {
         .expect("segment with entry point not found");
     ndisasm(&code_ph.data[..], file.entry_point);
 
+    // --- MAPPING SEGMENTS ---
+
     println!("Mapping {:?} in memory...", input_path);
 
-    // we'll need to hold onto our "mmap::MemoryMap", because dropping them
-    // unmaps them!
     let mut mappings = Vec::new();
     let base = 0x400000;
-    let addr = 0x1000;
-    println!("{:X} + {:X} = {:X}", addr, base, addr+base);
 
-    // we're only interested in "Load" segments
     for ph in file
         .program_headers
         .iter()
-        .filter(|ph| ph.r#type == delf::SegmentType::Load)
+        .filter(|ph| ph.r#type == SegmentType::Load)
         .filter(|ph| !ph.mem_range().is_empty())
     {
-        println!("Mapping segment @ virt {:?}, adjusted {:X}..{:X}, flags {:?}", ph.mem_range(), ph.mem_range().start.0 + base, ph.mem_range().end.0 + base, ph.flags);
         let mem_range = ph.mem_range();
         let len: usize = (mem_range.end - mem_range.start).into();
 
@@ -48,12 +67,21 @@ fn main() {
         let padding = start - aligned_start;
         let len = len + padding as usize;
 
+        println!(
+            "Mapping segment @ virt {:?}, adjusted {:X}..{:X}, padding {:X}",
+            ph.mem_range(),
+            ph.mem_range().start.0 + base,
+            ph.mem_range().end.0 + base,
+            padding
+        );
+
         let addr = aligned_start as *mut u8;
         let map = MemoryMap::new(len, &[MapOption::MapWritable, MapOption::MapAddr(addr)]).unwrap();
 
-        println!("Copying segment data...");
-        unsafe { std::slice::from_raw_parts_mut(addr, ph.data.len()) }
-            .copy_from_slice(&ph.data[..]);
+        println!("Copying segment data to addr {:?}...", addr);
+        let addr = (aligned_start + padding) as *mut u8;
+        let segment_data = unsafe { std::slice::from_raw_parts_mut(addr, ph.data.len()) };
+        segment_data.copy_from_slice(&ph.data[..]);
 
         println!("Adjusting permissions...");
         let mut protection = Protection::NONE;
@@ -70,7 +98,8 @@ fn main() {
         mappings.push(map);
     }
 
-    println!("u64: {:X}, *const u8: {:X?}", file.entry_point.0 + base as u64, (file.entry_point.0 + base as u64) as *const u8);
+    // --- JUMPING ---
+
     let to_jmp = (file.entry_point.0 + base as u64) as *const u8;
     println!("Jumping to entry point @ {:?}...", to_jmp);
     unsafe {
