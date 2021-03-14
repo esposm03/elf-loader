@@ -1,5 +1,6 @@
-use crate::{Addr, Input, ParseResult};
+use crate::{Addr, Input, ParseResult, impl_parse_for_enum};
 use derive_try_from_primitive::TryFromPrimitive;
+use std::convert::TryFrom;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
@@ -80,13 +81,45 @@ pub enum DynamicTag {
     FiniArraySz = 28,
     Runpath = 29,
     Flags = 30,
-    LoOs = 0x60000000,
-    HiOs = 0x6fffffff,
     GnuHash = 0x6ffffef5,
-    Flags1 = 0x6ffffffb,
-    RelACount = 0x6ffffff9,
-    VerNeed = 0x6ffffffe,
     VerSym = 0x6ffffff0,
-    LoProc = 0x70000000,
-    HiProc = 0x7fffffff,
+    RelaCount = 0x6ffffff9,
+    Flags1 = 0x6ffffffb,
+    VerDef = 0x6ffffffc,
+    VerDefNum = 0x6ffffffd,
+    VerNeed = 0x6ffffffe,
+    VerNeedNum = 0x6fffffff,
 }
+
+#[derive(Debug)]
+pub struct Rela {
+    pub offset: Addr,
+    pub r#type: RelType,
+    pub sym: u32,
+    pub addend: Addr,
+}
+
+impl Rela {
+    pub fn parse(i: Input) -> ParseResult<Self> {
+        use nom::{combinator::map, number::complete::le_u32, sequence::tuple};
+        map(
+            tuple((Addr::parse, RelType::parse, le_u32, Addr::parse)),
+            |(offset, r#type, sym, addend)| Rela {
+                offset,
+                r#type,
+                sym,
+                addend,
+            },
+        )(i)
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, TryFromPrimitive, Clone, Copy, PartialEq, Eq)]
+pub enum RelType {
+    GlobDat = 6,
+    JumpSlot = 7,
+    Relative = 8,
+}
+
+impl_parse_for_enum!(RelType, le_u32);
