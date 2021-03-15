@@ -1,6 +1,124 @@
-use crate::{Addr, Input, ParseResult, impl_parse_for_enum};
+use std::{convert::TryFrom, fmt, ops::Range};
+
+use crate::{impl_parse_for_enum, impl_parse_for_enumflags, Addr, Input, ParseResult};
 use derive_try_from_primitive::TryFromPrimitive;
-use std::convert::TryFrom;
+use enumflags2::{bitflags, BitFlags};
+use nom::{
+    combinator::{map, verify},
+    multi::many_till,
+};
+
+/// A program header
+///
+/// The program headers are parts of an ELF file useful when executing it.
+/// In a file, there are generally many, each of them referring to a "segment"
+/// (some data in the file and, if the segment is `Load`, in memory)
+///
+///
+///
+pub struct ProgramHeader {
+    pub r#type: SegmentType,
+    pub flags: BitFlags<SegmentFlag>,
+    pub offset: Addr,
+    pub vaddr: Addr,
+    pub paddr: Addr,
+    pub filesz: Addr,
+    pub memsz: Addr,
+    pub align: Addr,
+    pub data: Vec<u8>,
+
+    pub contents: SegmentContents,
+}
+
+impl ProgramHeader {
+    /// Get the range where segment data is located in the file
+    pub fn file_range(&self) -> Range<Addr> {
+        self.offset..self.offset + self.filesz
+    }
+
+    /// Get the range where segment data is located in memory, when loaded
+    pub fn mem_range(&self) -> Range<Addr> {
+        self.vaddr..self.vaddr + self.memsz
+    }
+
+    /// Parse the program header
+    pub fn parse<'a>(full_input: Input<'a>, i: Input<'a>) -> ParseResult<'a, Self> {
+        let (i, r#type) = SegmentType::parse(i)?;
+        let (i, flags): _ = SegmentFlag::parse(i)?;
+
+        let (i, offset) = Addr::parse(i)?;
+        let (i, vaddr) = Addr::parse(i)?;
+        let (i, paddr) = Addr::parse(i)?;
+        let (i, filesz) = Addr::parse(i)?;
+        let (i, memsz) = Addr::parse(i)?;
+        let (i, align) = Addr::parse(i)?;
+
+        let slice = &full_input[offset.into()..][..filesz.into()];
+        let (_, contents) = match r#type {
+            SegmentType::Dynamic => map(
+                many_till(
+                    DynamicEntry::parse,
+                    verify(DynamicEntry::parse, |e| e.tag == DynamicTag::Null),
+                ),
+                |(entries, _last)| SegmentContents::Dynamic(entries),
+            )(slice)?,
+            _ => (slice, SegmentContents::Unknown),
+        };
+
+        let res = Self {
+            r#type,
+            flags,
+            offset,
+            vaddr,
+            paddr,
+            filesz,
+            memsz,
+            align,
+            data: slice.to_vec(),
+            contents,
+        };
+        Ok((i, res))
+    }
+}
+
+impl fmt::Debug for ProgramHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "file {:?} | mem {:?} | align {:?} | {} {:?}",
+            self.file_range(),
+            self.mem_range(),
+            self.align,
+            &[
+                (SegmentFlag::Read, "R"),
+                (SegmentFlag::Write, "W"),
+                (SegmentFlag::Execute, "X")
+            ]
+            .iter()
+            .map(|&(flag, letter)| {
+                if self.flags.contains(flag) {
+                    letter
+                } else {
+                    "."
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+            self.r#type,
+        )
+    }
+}
+
+#[bitflags]
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentFlag {
+    Execute = 0x1,
+    Write = 0x2,
+    Read = 0x4,
+}
+
+impl_parse_for_enumflags!(SegmentFlag, le_u32);
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
@@ -31,7 +149,7 @@ pub enum SegmentContents {
     Unknown,
 }
 
-/// A dynamic entry 
+/// A dynamic entry
 #[derive(Debug)]
 pub struct DynamicEntry {
     pub tag: DynamicTag,
@@ -91,35 +209,5 @@ pub enum DynamicTag {
     VerNeedNum = 0x6fffffff,
 }
 
-#[derive(Debug)]
-pub struct Rela {
-    pub offset: Addr,
-    pub r#type: RelType,
-    pub sym: u32,
-    pub addend: Addr,
-}
-
-impl Rela {
-    pub fn parse(i: Input) -> ParseResult<Self> {
-        use nom::{combinator::map, number::complete::le_u32, sequence::tuple};
-        map(
-            tuple((Addr::parse, RelType::parse, le_u32, Addr::parse)),
-            |(offset, r#type, sym, addend)| Rela {
-                offset,
-                r#type,
-                sym,
-                addend,
-            },
-        )(i)
-    }
-}
-
-#[repr(u32)]
-#[derive(Debug, TryFromPrimitive, Clone, Copy, PartialEq, Eq)]
-pub enum RelType {
-    GlobDat = 6,
-    JumpSlot = 7,
-    Relative = 8,
-}
-
-impl_parse_for_enum!(RelType, le_u32);
+impl_parse_for_enum!(DynamicTag, le_u64);
+impl_parse_for_enum!(SegmentType, le_u32);

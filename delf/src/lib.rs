@@ -1,25 +1,35 @@
+//! Parsing Elf files
+
 pub mod components;
-use components::segment::{DynamicEntry, DynamicTag, Rela, SegmentContents, SegmentType};
+use components::{
+    rela::Rela,
+    segment::{DynamicTag, ProgramHeader, SegmentContents, SegmentType},
+};
 
 use std::convert::TryFrom;
-use std::{fmt, ops::Range};
+use std::fmt;
 
 use derive_more::*;
 use derive_try_from_primitive::TryFromPrimitive;
-use enumflags2::{bitflags, BitFlags};
-use nom::{Err::{Error, Failure}, Offset, multi::many_till};
+
 use nom::{
     branch::alt,
     bytes::complete::{tag, take},
     combinator::{map, verify},
     error::context,
+    multi::many_m_n,
     number::complete::{le_u16, le_u32, le_u64},
     sequence::tuple,
+    Err::{Error, Failure},
+    Offset,
 };
 
 pub type Input<'a> = &'a [u8];
 pub type ParseResult<'a, O> = nom::IResult<Input<'a>, O, nom::error::VerboseError<Input<'a>>>;
 
+/// Given an enum, implement a `parse` method for it that takes a primitive,
+/// processes it with the function given as the second parameter, and returns
+/// an enum
 #[macro_export]
 macro_rules! impl_parse_for_enum {
     ($type: ident, $number_parser: ident) => {
@@ -39,6 +49,9 @@ macro_rules! impl_parse_for_enum {
     };
 }
 
+/// Given an enum, implement a `parse` method for it that takes a primitive,
+/// processes it with the function given as the second parameter, and returns
+/// a `BitFlags`
 #[macro_export]
 macro_rules! impl_parse_for_enumflags {
     ($type: ident, $number_parser: ident) => {
@@ -58,6 +71,7 @@ macro_rules! impl_parse_for_enumflags {
     };
 }
 
+/// An ELF file
 #[derive(Debug)]
 pub struct File {
     pub typ: ElfType,
@@ -69,7 +83,7 @@ pub struct File {
 impl File {
     const MAGIC: &'static [u8] = &[0x7F, 0x45, 0x4C, 0x46];
 
-    #[allow(unused_variables)]
+    /// Parse an Elf file given some bytes
     pub fn parse(i: Input) -> ParseResult<Self> {
         let full_input = i;
 
@@ -92,14 +106,14 @@ impl File {
 
         // Section headers and program headers
         let (i, ph_offset) = Addr::parse(i)?;
-        let (i, sh_offset) = Addr::parse(i)?;
-        let (i, flags) = le_u32(i)?;
-        let (i, hdr_size) = le_u16(i)?;
+        let (i, _sh_offset) = Addr::parse(i)?;
+        let (i, _flags) = le_u32(i)?;
+        let (i, _hdr_size) = le_u16(i)?;
         let (i, ph_entsize) = u16_usize(i)?;
         let (i, ph_count) = u16_usize(i)?;
-        let (i, sh_entsize) = u16_usize(i)?;
-        let (i, sh_count) = u16_usize(i)?;
-        let (i, sh_nidx) = u16_usize(i)?;
+        let (i, _sh_entsize) = u16_usize(i)?;
+        let (i, _sh_count) = u16_usize(i)?;
+        let (i, _sh_nidx) = u16_usize(i)?;
 
         let ph_slices = full_input[ph_offset.into()..].chunks(ph_entsize);
         let mut program_headers = Vec::new();
@@ -117,6 +131,7 @@ impl File {
         Ok((i, res))
     }
 
+    /// Parse an Elf file, or report a (somewhat) user-friendly error
     pub fn parse_or_print_error(i: Input) -> Option<Self> {
         match Self::parse(i) {
             Ok((_, file)) => Some(file),
@@ -133,6 +148,7 @@ impl File {
         }
     }
 
+    /// Return the program header whose segment contains the given address
     pub fn segment_at(&self, addr: Addr) -> Option<&ProgramHeader> {
         self.program_headers
             .iter()
@@ -140,10 +156,31 @@ impl File {
             .find(|ph| ph.mem_range().contains(&addr))
     }
 
+    /// Take a slice of data from the given address until the end of its segment
+    pub fn slice_at(&self, addr: Addr) -> Option<&[u8]> {
+        self.segment_at(addr).map(|seg| {
+            &seg.data[(addr - seg.mem_range().start).into()..]
+        })
+    }
+
+    /// Get the string at the given offset into the string table
+    pub fn get_string(&self, offset: Addr) -> Result<String, GetStringError> {
+        use DynamicTag as DT;
+        use GetStringError as E;
+
+        let addr = self.dynamic_entry(DT::StrTab).ok_or(E::StrTabNotFound)?;
+        let slice = self.slice_at(addr + offset).ok_or(E::StrTabSegmentNotFound)?;
+        let string_slice = slice.split(|&c| c == 0x00).next().ok_or(E::StringNotFound)?;
+
+        Ok(String::from_utf8_lossy(string_slice).into())
+    }
+
+    /// Return the first program header whose segment has the specified type
     pub fn segment_of_type(&self, r#type: SegmentType) -> Option<&ProgramHeader> {
         self.program_headers.iter().find(|ph| ph.r#type == r#type)
     }
 
+    /// Return the dynamic entry with the given type
     pub fn dynamic_entry(&self, tag: DynamicTag) -> Option<Addr> {
         match self.segment_of_type(SegmentType::Dynamic) {
             Some(ProgramHeader {
@@ -154,18 +191,20 @@ impl File {
         }
     }
 
+    /// Read the relocation table
     pub fn read_rela_entries(&self) -> Result<Vec<Rela>, ReadRelaError> {
         use DynamicTag as DT;
         use ReadRelaError as E;
 
         let addr = self.dynamic_entry(DT::Rela).ok_or(E::RelaNotFound)?;
         let len = self.dynamic_entry(DT::RelaSz).ok_or(E::RelaSzNotFound)?;
-        let seg = self.segment_at(addr).ok_or(E::RelaSzNotFound)?;
+        let ent = self.dynamic_entry(DT::RelaEnt).ok_or(E::RelaEntNotFound)?;
 
-        let i = &seg.data[(addr - seg.mem_range().start).into()..][..len.into()];
+        let i = self.slice_at(addr).ok_or(E::RelaSegmentNotFound)?;
+        let i = &i[..len.into()];
+        let n = (len.0 / ent.0) as usize;
 
-        use nom::multi::many0;
-        match many0(Rela::parse)(i) {
+        match many_m_n(n, n, Rela::parse)(i) {
             Ok((_, rela_entries)) => Ok(rela_entries),
             Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
                 let e = &err.errors[0];
@@ -178,95 +217,35 @@ impl File {
     }
 }
 
-pub struct ProgramHeader {
-    pub r#type: SegmentType,
-    pub flags: BitFlags<SegmentFlag>,
-    pub offset: Addr,
-    pub vaddr: Addr,
-    pub paddr: Addr,
-    pub filesz: Addr,
-    pub memsz: Addr,
-    pub align: Addr,
-    pub data: Vec<u8>,
-
-    pub contents: SegmentContents,
+/// An error that occurred while trying to read relocations
+#[derive(thiserror::Error, Debug)]
+pub enum ReadRelaError {
+    #[error("Rela dynamic entry not found")]
+    RelaNotFound,
+    #[error("RelaSz dynamic entry not found")]
+    RelaSzNotFound,
+    #[error("RelaEnt dynamic entry not found")]
+    RelaEntNotFound,
+    #[error("RelaSeg dynamic entry not found")]
+    RelaSegNotFound,
+    #[error("Rela segment not found")]
+    RelaSegmentNotFound,
+    #[error("Parsing error")]
+    ParsingError(nom::error::VerboseErrorKind),
 }
 
-impl ProgramHeader {
-    pub fn file_range(&self) -> Range<Addr> {
-        self.offset..self.offset + self.filesz
-    }
-    pub fn mem_range(&self) -> Range<Addr> {
-        self.vaddr..self.vaddr + self.memsz
-    }
-
-    fn parse<'a>(full_input: Input<'a>, i: Input<'a>) -> ParseResult<'a, Self> {
-        let (i, r#type) = SegmentType::parse(i)?;
-        let (i, flags): _ = SegmentFlag::parse(i)?;
-
-        let (i, offset) = Addr::parse(i)?;
-        let (i, vaddr) = Addr::parse(i)?;
-        let (i, paddr) = Addr::parse(i)?;
-        let (i, filesz) = Addr::parse(i)?;
-        let (i, memsz) = Addr::parse(i)?;
-        let (i, align) = Addr::parse(i)?;
-
-        let slice = &full_input[offset.into()..][..filesz.into()];
-        let (_, contents) = match r#type {
-            SegmentType::Dynamic => map(
-                many_till(
-                    DynamicEntry::parse,
-                    verify(DynamicEntry::parse, |e| e.tag == DynamicTag::Null),
-                ),
-                |(entries, _last)| SegmentContents::Dynamic(entries),
-            )(slice)?,
-            _ => (slice, SegmentContents::Unknown),
-        };
-
-        let res = Self {
-            r#type,
-            flags,
-            offset,
-            vaddr,
-            paddr,
-            filesz,
-            memsz,
-            align,
-            data: slice.to_vec(),
-            contents,
-        };
-        Ok((i, res))
-    }
+/// An error that occurred while trying to read strings from the file
+#[derive(thiserror::Error, Debug)]
+pub enum GetStringError {
+    #[error("StrTab dynamic entry not found")]
+    StrTabNotFound,
+    #[error("StrTab segment not found")]
+    StrTabSegmentNotFound,
+    #[error("String not found")]
+    StringNotFound,
 }
 
-impl fmt::Debug for ProgramHeader {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "file {:?} | mem {:?} | align {:?} | {} {:?}",
-            self.file_range(),
-            self.mem_range(),
-            self.align,
-            &[
-                (SegmentFlag::Read, "R"),
-                (SegmentFlag::Write, "W"),
-                (SegmentFlag::Execute, "X")
-            ]
-            .iter()
-            .map(|&(flag, letter)| {
-                if self.flags.contains(flag) {
-                    letter
-                } else {
-                    "."
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(""),
-            self.r#type,
-        )
-    }
-}
-
+/// The type of an ELF file
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive)]
 pub enum ElfType {
@@ -277,6 +256,7 @@ pub enum ElfType {
     Core = 0x4,
 }
 
+/// The machine an ELF file targets
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive)]
 pub enum Machine {
@@ -284,26 +264,15 @@ pub enum Machine {
     X86_64 = 0x3E,
 }
 
-
-#[bitflags]
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SegmentFlag {
-    Execute = 0x1,
-    Write = 0x2,
-    Read = 0x4,
-}
-
 impl_parse_for_enum!(ElfType, le_u16);
 impl_parse_for_enum!(Machine, le_u16);
-impl_parse_for_enum!(DynamicTag, le_u64);
-impl_parse_for_enum!(SegmentType, le_u32);
 
-impl_parse_for_enumflags!(SegmentFlag, le_u32);
-
+/// An address in memory
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Add, Sub)]
 pub struct Addr(pub u64);
+
 impl Addr {
+    /// Parse an address
     pub fn parse(i: Input) -> ParseResult<Self> {
         map(le_u64, From::from)(i)
     }
@@ -335,18 +304,6 @@ impl From<u64> for Addr {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum ReadRelaError {
-    #[error("Rela dynamic entry not found")]
-    RelaNotFound,
-    #[error("RelaSz dynamic entry not found")]
-    RelaSzNotFound,
-    #[error("Rela segment not found")]
-    RelaSegmentNotFound,
-    #[error("Parsing error")]
-    ParsingError(nom::error::VerboseErrorKind),
-}
-
 #[cfg(test)]
 mod tests {
     use super::Machine;
@@ -361,7 +318,7 @@ mod tests {
 
     #[test]
     fn try_bitflag() {
-        use super::SegmentFlag;
+        use crate::components::segment::SegmentFlag;
         use enumflags2::BitFlags;
 
         // this is a value we could've read straight from an ELF file

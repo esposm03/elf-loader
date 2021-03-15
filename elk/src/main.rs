@@ -4,7 +4,10 @@ use std::{
     process::{Command, Stdio},
 };
 
-use delf::components::segment::{RelType, SegmentContents, SegmentType};
+use delf::components::{
+    rela::{KnownRelType, RelType},
+    segment::{SegmentFlag, SegmentType},
+};
 use mmap::{MapOption, MemoryMap};
 use region::{protect, Protection};
 
@@ -82,12 +85,17 @@ fn main() {
                     let reloc_addr: *mut u64 =
                         trans(real_segment_start.add(offset_into_segment.into()));
                     match reloc.r#type {
-                        RelType::Relative => {
-                            let reloc_value = reloc.addend + delf::Addr(base as u64);
-                            *reloc_addr = reloc_value.0;
+                        RelType::Known(t) => {
+                            num_relocs += 1;
+                            if let KnownRelType::Relative = t {
+                                let reloc_value: _ = reloc.addend + delf::Addr(base as u64);
+                                *reloc_addr = reloc_value.0;
+                            } else {
+                                panic!(format!("Unsupported relocation type {:?}", t));
+                            }
                         }
-                        r#type => {
-                            panic!("Unsupported relocation type {:?}", r#type);
+                        RelType::Unknown(i) => {
+                            println!("(Found unknown relocation type {})", i);
                         }
                     }
                 }
@@ -102,9 +110,9 @@ fn main() {
         let mut protection = Protection::NONE;
         for flag in ph.flags.iter() {
             protection |= match flag {
-                delf::SegmentFlag::Read => Protection::READ,
-                delf::SegmentFlag::Write => Protection::WRITE,
-                delf::SegmentFlag::Execute => Protection::EXECUTE,
+                SegmentFlag::Read => Protection::READ,
+                SegmentFlag::Write => Protection::WRITE,
+                SegmentFlag::Execute => Protection::EXECUTE,
             }
         }
         unsafe {
