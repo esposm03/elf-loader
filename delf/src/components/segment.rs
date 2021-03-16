@@ -166,7 +166,7 @@ impl DynamicEntry {
 
 /// The tag of a dynamic entry
 #[repr(u64)]
-#[derive(Debug, TryFromPrimitive, PartialEq, Eq)]
+#[derive(Debug, TryFromPrimitive, PartialEq, Eq, Clone, Copy)]
 pub enum DynamicTag {
     Null = 0,
     Needed = 1,

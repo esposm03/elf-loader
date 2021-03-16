@@ -5,3 +5,5 @@ elk/samples/nodata
 elk/samples/entry-point
 elk/samples/rel-pie
 elk/samples/abs-pie
+elk/samples/dl
+elk/samples/libmsg.so

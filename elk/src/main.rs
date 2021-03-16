@@ -4,10 +4,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use delf::components::{
-    rela::{KnownRelType, RelType},
-    segment::{SegmentFlag, SegmentType},
-};
+use delf::components::{rela::{KnownRelType, RelType}, segment::{DynamicTag, SegmentContents, SegmentFlag, SegmentType}};
 use mmap::{MapOption, MemoryMap};
 use region::{protect, Protection};
 
@@ -15,6 +12,7 @@ fn main() {
     // General steps:
     // - load and parse the Elf file
     // - Map every segment that is `Load` to the right place in memory
+    // - Apply relocations to the given
     // - Set the correct memory protection for each mapping
     // - For each segment, copy its data from the file to memory
     // - Jump to the entry point
@@ -29,6 +27,21 @@ fn main() {
     };
     println!("Entry point: {:X}", file.entry_point.0);
     println!("Program Headers: {:#?}", file.program_headers);
+
+    if let Some(dynseg) = file.segment_of_type(SegmentType::Dynamic) {
+        if let SegmentContents::Dynamic(ref dyntab) = dynseg.contents {
+            println!("Dynamic table entries:");
+            for e in dyntab {
+                println!("{:?}", e);
+                match e.tag {
+                    DynamicTag::Needed | DynamicTag::RPath | DynamicTag::Runpath => {
+                        println!(" => {:?}", file.get_string(e.addr).unwrap());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 
     let mut mappings = Vec::new();
     let rela_entries = file.read_rela_entries().unwrap_or_else(|e| {

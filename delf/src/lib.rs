@@ -1,10 +1,7 @@
 //! Parsing Elf files
 
 pub mod components;
-use components::{
-    rela::Rela,
-    segment::{DynamicTag, ProgramHeader, SegmentContents, SegmentType},
-};
+use components::{rela::Rela, segment::{DynamicEntry, DynamicTag, ProgramHeader, SegmentContents, SegmentType}};
 
 use std::convert::TryFrom;
 use std::fmt;
@@ -180,17 +177,6 @@ impl File {
         self.program_headers.iter().find(|ph| ph.r#type == r#type)
     }
 
-    /// Return the dynamic entry with the given type
-    pub fn dynamic_entry(&self, tag: DynamicTag) -> Option<Addr> {
-        match self.segment_of_type(SegmentType::Dynamic) {
-            Some(ProgramHeader {
-                contents: SegmentContents::Dynamic(entries),
-                ..
-            }) => entries.iter().find(|e| e.tag == tag).map(|e| e.addr),
-            _ => None,
-        }
-    }
-
     /// Read the relocation table
     pub fn read_rela_entries(&self) -> Result<Vec<Rela>, ReadRelaError> {
         use DynamicTag as DT;
@@ -214,6 +200,39 @@ impl File {
             // we don't use any "streaming" parsers, so `nom::Err::Incomplete` seems unlikely
             _ => unreachable!(),
         }
+    }
+
+    /// Get the dynamic table of this ELF file
+    pub fn dynamic_table(&self) -> Option<&[DynamicEntry]> {
+        match self.segment_of_type(SegmentType::Dynamic) {
+            Some(ProgramHeader {
+                contents: SegmentContents::Dynamic(entries),
+                ..
+            }) => Some(entries),
+            _ => None,
+        }
+    }
+
+    /// Return an iterator over the addresses dynamic entries
+    pub fn dynamic_entries(&self, tag: DynamicTag) -> impl Iterator<Item = Addr> + '_ {
+        self.dynamic_table()
+            .unwrap_or_default()
+            .iter()
+            .filter(move |e| e.tag == tag)
+            .map(|e| e.addr)
+    }
+
+    /// Return the dynamic entry with the given type
+    pub fn dynamic_entry(&self, tag: DynamicTag) -> Option<Addr> {
+        self.dynamic_entries(tag).next()
+    }
+
+    /// Return the dynamic entry with the given type
+    ///
+    /// NOTE: This silently drops any string it can't read
+    pub fn dynamic_entry_strings(&self, tag: DynamicTag) -> impl Iterator<Item = String> + '_ {
+        self.dynamic_entries(tag)
+            .filter_map(move |addr| self.get_string(addr).ok())
     }
 }
 
