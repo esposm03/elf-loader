@@ -1,146 +1,24 @@
-use std::{
-    fs,
-    io::Write,
-    process::{Command, Stdio},
-};
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(dead_code)]
+
+mod process;
+
+use std::{error::Error, fs, io::Write, process::{Command, Stdio}};
 
 use delf::components::{rela::{KnownRelType, RelType}, segment::{DynamicTag, SegmentContents, SegmentFlag, SegmentType}};
 use mmap::{MapOption, MemoryMap};
+use process::Process;
 use region::{protect, Protection};
 
-fn main() {
-    // General steps:
-    // - load and parse the Elf file
-    // - Map every segment that is `Load` to the right place in memory
-    // - Apply relocations to the given
-    // - Set the correct memory protection for each mapping
-    // - For each segment, copy its data from the file to memory
-    // - Jump to the entry point
-
+fn main() -> Result<(), Box<dyn Error>> {
     let input_path = std::env::args().nth(1).expect("Usage: elk <path>");
-    let content = fs::read(&input_path).expect("Failed to read file");
 
-    println!("Analyzing {:?}...", input_path);
-    let file = match delf::File::parse_or_print_error(&content) {
-        Some(f) => f,
-        None => std::process::exit(1),
-    };
-    println!("Entry point: {:X}", file.entry_point.0);
-    println!("Program Headers: {:#?}", file.program_headers);
+    let mut proc = Process::new();
+    let exec = proc.load_obj_and_deps(&input_path).unwrap();
+    //println!("{:#?}", proc);
 
-    if let Some(dynseg) = file.segment_of_type(SegmentType::Dynamic) {
-        if let SegmentContents::Dynamic(ref dyntab) = dynseg.contents {
-            println!("Dynamic table entries:");
-            for e in dyntab {
-                println!("{:?}", e);
-                match e.tag {
-                    DynamicTag::Needed | DynamicTag::RPath | DynamicTag::Runpath => {
-                        println!(" => {:?}", file.get_string(e.addr).unwrap());
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    let mut mappings = Vec::new();
-    let rela_entries = file.read_rela_entries().unwrap_or_else(|e| {
-        println!("Failed to read relocations: {:?}", e);
-        Vec::new()
-    });
-    let base = 0x400000;
-
-    println!();
-    println!("Loading with base address 0x{:X}", base);
-
-    let non_empty_program_headers = file
-        .program_headers
-        .iter()
-        .filter(|ph| ph.r#type == SegmentType::Load)
-        .filter(|ph| !ph.mem_range().is_empty());
-
-    for ph in non_empty_program_headers {
-        println!("Mapping {:?} - {:?}", ph.mem_range(), ph.flags);
-
-        let mem_range = ph.mem_range();
-        let len: usize = (mem_range.end - mem_range.start).into();
-
-        let start = mem_range.start.0 + base;
-        let aligned_start = align_lo(start);
-        let padding = start - aligned_start;
-        let len = len + padding as usize;
-
-        let addr = aligned_start as *mut u8;
-        if padding > 0 {
-            println!("(With 0x{:X} bytes of padding at the start)", padding);
-        }
-
-        let map = MemoryMap::new(len, &[MapOption::MapWritable, MapOption::MapAddr(addr)]).unwrap();
-
-        // Copy segment data
-        let addr = (aligned_start + padding) as *mut u8;
-        let segment_data = unsafe { std::slice::from_raw_parts_mut(addr, ph.data.len()) };
-        segment_data.copy_from_slice(&ph.data[..]);
-
-        // Apply relocations
-        let mut num_relocs = 0;
-        for reloc in &rela_entries {
-            if mem_range.contains(&reloc.offset) {
-                num_relocs += 1;
-                unsafe {
-                    use std::mem::transmute as trans;
-                    let real_segment_start = addr.add(padding as usize);
-
-                    let specified_reloc_offset = reloc.offset;
-                    let specified_segment_start = mem_range.start;
-                    let offset_into_segment = specified_reloc_offset - specified_segment_start;
-
-                    let reloc_addr: *mut u64 =
-                        trans(real_segment_start.add(offset_into_segment.into()));
-                    match reloc.r#type {
-                        RelType::Known(t) => {
-                            num_relocs += 1;
-                            if let KnownRelType::Relative = t {
-                                let reloc_value: _ = reloc.addend + delf::Addr(base as u64);
-                                *reloc_addr = reloc_value.0;
-                            } else {
-                                panic!(format!("Unsupported relocation type {:?}", t));
-                            }
-                        }
-                        RelType::Unknown(i) => {
-                            println!("(Found unknown relocation type {})", i);
-                        }
-                    }
-                }
-            }
-        }
-
-        if num_relocs > 0 {
-            println!("(Applied {} relocations)", num_relocs);
-        }
-
-        // Changing memory area permissions
-        let mut protection = Protection::NONE;
-        for flag in ph.flags.iter() {
-            protection |= match flag {
-                SegmentFlag::Read => Protection::READ,
-                SegmentFlag::Write => Protection::WRITE,
-                SegmentFlag::Execute => Protection::EXECUTE,
-            }
-        }
-        unsafe {
-            protect(addr, len, protection).unwrap();
-        }
-        mappings.push(map);
-    }
-
-    // --- JUMPING ---
-
-    let to_jmp = (file.entry_point.0 + base as u64) as *const u8;
-    println!("Jumping to entry point @ {:?}...\n", to_jmp);
-    unsafe {
-        jmp(to_jmp);
-    }
+    Ok(())
 }
 
 /// Jump to the given address

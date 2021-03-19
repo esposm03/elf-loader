@@ -1,6 +1,6 @@
 use std::{convert::TryFrom, fmt, ops::Range};
 
-use crate::{impl_parse_for_enum, impl_parse_for_enumflags, Addr, Input, ParseResult};
+use crate::{impl_parse_for_enum, impl_parse_for_enumflags, Addr, parse};
 use derive_try_from_primitive::TryFromPrimitive;
 use enumflags2::{bitflags, BitFlags};
 use nom::{
@@ -42,7 +42,7 @@ impl ProgramHeader {
     }
 
     /// Parse the program header
-    pub fn parse<'a>(full_input: Input<'a>, i: Input<'a>) -> ParseResult<'a, Self> {
+    pub fn parse<'a>(full_input: parse::Input<'a>, i: parse::Input<'a>) -> parse::Result<'a, Self> {
         let (i, r#type) = SegmentType::parse(i)?;
         let (i, flags): _ = SegmentFlag::parse(i)?;
 
@@ -157,7 +157,7 @@ pub struct DynamicEntry {
 }
 
 impl DynamicEntry {
-    pub fn parse(i: Input) -> ParseResult<Self> {
+    pub fn parse(i: parse::Input) -> parse::Result<Self> {
         let (i, tag) = DynamicTag::parse(i)?;
         let (i, addr) = Addr::parse(i)?;
         Ok((i, Self { addr, tag }))

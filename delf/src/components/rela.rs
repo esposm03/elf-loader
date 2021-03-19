@@ -3,7 +3,7 @@ use std::convert::TryFrom;
 use derive_try_from_primitive::TryFromPrimitive;
 use nom::{branch::alt, combinator::map, number::complete::le_u32, sequence::tuple};
 
-use crate::{impl_parse_for_enum, Addr, Input, ParseResult};
+use crate::{impl_parse_for_enum, Addr, parse};
 
 #[derive(Debug)]
 pub struct Rela {
@@ -14,7 +14,7 @@ pub struct Rela {
 }
 
 impl Rela {
-    pub fn parse(i: Input) -> ParseResult<Self> {
+    pub fn parse(i: parse::Input) -> parse::Result<Self> {
         map(
             tuple((Addr::parse, RelType::parse, le_u32, Addr::parse)),
             |(offset, r#type, sym, addend)| Rela {
@@ -45,7 +45,7 @@ pub enum RelType {
 }
 
 impl RelType {
-    pub fn parse(i: Input) -> ParseResult<Self> {
+    pub fn parse(i: parse::Input) -> parse::Result<Self> {
         alt((
             map(KnownRelType::parse, Self::Known),
             map(le_u32, Self::Unknown),
