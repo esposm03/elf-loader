@@ -451,6 +451,23 @@ impl Addr {
     pub fn parse(i: parse::Input) -> parse::Result<Self> {
         map(le_u64, From::from)(i)
     }
+
+    /// # Safety
+    ///
+    /// This can create dangling pointers and all sorts of eldritch
+    /// errors.
+    pub unsafe fn as_ptr<T>(&self) -> *const T {
+        std::mem::transmute(self.0 as usize)
+    }
+
+    /// # Safety
+    ///
+    /// This can create dangling pointers and all sorts of eldritch
+    /// errors.
+    pub unsafe fn as_mut_ptr<T>(&self) -> *mut T {
+        std::mem::transmute(self.0 as usize)
+    }
+
 }
 
 impl fmt::Debug for Addr {
