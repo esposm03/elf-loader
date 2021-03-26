@@ -297,11 +297,10 @@ pub fn convex_hull(a: Range<Addr>, b: Range<Addr>) -> Range<Addr> {
 }
 
 /// Dump the memory maps of the current process
-fn dump_maps(msg: &str) {
-    use std::{fs, process};
-
+#[allow(dead_code)]
+pub fn dump_maps(msg: &str) {
     println!("======== MEMORY MAPS: {}", msg);
-    fs::read_to_string(format!("/proc/{pid}/maps", pid = process::id()))
+    fs::read_to_string(format!("/proc/{pid}/maps", pid = std::process::id()))
         .unwrap()
         .lines()
         .filter(|line| line.contains("hello-dl") || line.contains("libmsg.so"))
