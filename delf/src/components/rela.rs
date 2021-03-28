@@ -1,10 +1,13 @@
+//! Utilities related to parsing of relocations
+
 use std::convert::TryFrom;
 
 use derive_try_from_primitive::TryFromPrimitive;
-use nom::{branch::alt, combinator::map, number::complete::le_u32, sequence::tuple};
+use nom::{combinator::map, number::complete::le_u32, sequence::tuple};
 
-use crate::{impl_parse_for_enum, Addr, parse};
+use crate::{impl_parse_for_enum, parse, Addr};
 
+/// A relocation
 #[derive(Debug)]
 pub struct Rela {
     pub offset: Addr,
@@ -14,6 +17,8 @@ pub struct Rela {
 }
 
 impl Rela {
+    pub const SIZE: usize = 24;
+
     pub fn parse(i: parse::Input) -> parse::Result<Self> {
         map(
             tuple((Addr::parse, RelType::parse, le_u32, Addr::parse)),
@@ -27,28 +32,14 @@ impl Rela {
     }
 }
 
+/// The type of a relocation
 #[repr(u32)]
 #[derive(Debug, TryFromPrimitive, Clone, Copy, PartialEq, Eq)]
-pub enum KnownRelType {
+pub enum RelType {
     _64 = 1,
     Copy = 5,
     GlobDat = 6,
     JumpSlot = 7,
     Relative = 8,
 }
-impl_parse_for_enum!(KnownRelType, le_u32);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RelType {
-    Known(KnownRelType),
-    Unknown(u32),
-}
-
-impl RelType {
-    pub fn parse(i: parse::Input) -> parse::Result<Self> {
-        alt((
-            map(KnownRelType::parse, Self::Known),
-            map(le_u32, Self::Unknown),
-        ))(i)
-    }
-}
+impl_parse_for_enum!(RelType, le_u32);

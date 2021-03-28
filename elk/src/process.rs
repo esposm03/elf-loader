@@ -1,29 +1,33 @@
+//! Loading of ELF objects, with dependencies
+
+use crate::name::Name;
+
+use std::mem;
 use std::{
-    ops::Range,
     cmp::{max, min},
     collections::HashMap,
+    ops::Range,
 };
 use std::{
     fs,
     io::Read,
-    path::{Path, PathBuf},
     os::unix::io::AsRawFd,
+    path::{Path, PathBuf},
 };
-use std::mem;
 
+use custom_debug_derive::Debug as CustomDebug;
 use enumflags2::BitFlags;
 use mmap::{MapOption, MemoryMap};
-use custom_debug_derive::Debug as CustomDebug;
 
 use delf::{
-    Addr,
-    File,
-    Sym,
     components::{
-        rela::{KnownRelType, RelType},
-        segment::{DynamicTag, SegmentFlag, SegmentType}
-    }
+        rela::{RelType, Rela},
+        segment::{DynamicTag, SegmentFlag, SegmentType},
+        sym::{Sym, SymBind},
+    },
+    Addr, File,
 };
+use multimap::MultiMap;
 
 /// An executable process in memory
 ///
@@ -104,47 +108,73 @@ impl Process {
             .ok_or(LoadError::NoLoadSegments)?;
 
         let mem_size: usize = (mem_range.end - mem_range.start).into();
-        let mem_map = MemoryMap::new(mem_size, &[])?;
+        let mem_map = MemoryMap::new(mem_size, &[MapOption::MapWritable, MapOption::MapReadable])?;
         let base = Addr(mem_map.data() as _);
         mem::forget(mem_map);
 
         let segments = load_segments()
-            .filter_map(|ph| {
-                if ph.memsz.0 > 0 {
-                    let vaddr = delf::Addr(ph.vaddr.0 & !0xFFF);
-                    let padding: Addr = ph.vaddr - vaddr;
-                    let offset: Addr = ph.offset - padding;
-                    let memsz: Addr = ph.memsz + padding;
-                    let map_res = MemoryMap::new(
-                        memsz.into(),
-                        &[
-                            MapOption::MapFd(fs_file.as_raw_fd()),
-                            MapOption::MapOffset(offset.into()),
-                            MapOption::MapAddr(unsafe { (base + vaddr).as_ptr() }),
-                            MapOption::MapReadable,
-                            MapOption::MapWritable,
-                        ],
-                    );
+            .filter(|&ph| ph.memsz.0 > 0)
+            .map(|ph| -> Result<_, LoadError> {
+                let vaddr = delf::Addr(ph.vaddr.0 & !0xFFF);
+                let padding = ph.vaddr - vaddr;
+                let offset = ph.offset - padding;
+                let filesz = ph.filesz + padding;
+                let map = MemoryMap::new(
+                    filesz.into(),
+                    &[
+                        MapOption::MapReadable,
+                        MapOption::MapWritable,
+                        MapOption::MapFd(fs_file.as_raw_fd()),
+                        MapOption::MapOffset(offset.into()),
+                        MapOption::MapAddr(unsafe { (base + vaddr).as_ptr() }),
+                    ],
+                )?;
 
-                    Some(map_res.map(|map| Segment {
-                        map,
-                        padding,
-                        flags: ph.flags,
-                    }))
-                } else {
-                    None
+                if ph.memsz > ph.filesz {
+                    let mut zero_start = base + ph.mem_range().start + ph.filesz;
+                    let zero_len = ph.memsz - ph.filesz;
+                    unsafe {
+                        for i in zero_start.as_mut_slice(zero_len.into()) {
+                            *i = 0u8;
+                        }
+                    }
                 }
+
+                Ok(Segment {
+                    map,
+                    padding,
+                    flags: ph.flags,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         let syms = file.read_syms()?;
+        let strtab = file
+            .get_dynamic_entry(DynamicTag::StrTab)
+            .unwrap_or_else(|_| panic!("String table not found in {:?}", path));
+        let syms: Vec<_> = syms
+            .into_iter()
+            .map(|sym| unsafe {
+                let name = Name::from_addr(base + strtab + sym.name);
+                NamedSym { sym, name }
+            })
+            .collect();
+
+        let mut sym_map = MultiMap::new();
+        for sym in &syms {
+            sym_map.insert(sym.name.clone(), sym.clone());
+        }
+
+        let rels = file.read_rela_entries()?;
 
         self.objects.push(Object {
             path: path.clone(),
             base,
+            rels,
             mem_range,
             file,
             syms,
+            sym_map,
             segments,
         });
 
@@ -188,23 +218,19 @@ impl Process {
     }
 
     /// Find a symbol by name, optionally excluding an object from the search
-    pub fn lookup_symbol(&self, name: &str, ignore: Option<&Object>) -> Result<Option<(&Object, &delf::Sym)>, RelocationError> {
-        let candidates = self
-            .objects
-            .iter()
-            .filter(|&obj| if let Some(ign) = ignore {
-                !std::ptr::eq(obj, ign)
-            } else {
-                true
-            });
-        for obj in candidates {
-            for (i, sym) in obj.syms.iter().enumerate() {
-                if obj.sym_name(i as u32)? == name {
-                    return Ok(Some((obj, sym)))
+    fn lookup_symbol(&self, wanted: &ObjectSym, ignore_self: bool) -> ResolvedSym {
+        for obj in &self.objects {
+            if ignore_self && std::ptr::eq(wanted.obj, obj) {
+                continue;
+            }
+
+            if let Some(syms) = obj.sym_map.get_vec(&wanted.sym.name) {
+                if let Some(sym) = syms.iter().find(|sym| !sym.sym.shndx.is_undef()) {
+                    return ResolvedSym::Defined(ObjectSym { obj, sym });
                 }
             }
         }
-        Ok(None)
+        ResolvedSym::Undefined
     }
 
     /// Retrieve an object by name
@@ -220,55 +246,68 @@ impl Process {
             .unwrap_or_else(|| self.load_object(path).map(GetResult::Fresh))
     }
 
+    /// Apply all the relocations of this process
     pub fn apply_relocations(&self) -> Result<(), RelocationError> {
-        for obj in self.objects.iter().rev() {
-            println!("Applying relocations for {:?}", obj.path);
+        let rels: Vec<_> = self
+            .objects
+            .iter()
+            .rev()
+            .map(|obj| obj.rels.iter().map(move |rel| ObjectRel { obj, rel }))
+            .flatten()
+            .collect();
 
-            match obj.file.read_rela_entries() {
-                Ok(rels) => for rel in rels {
-                    println!("Found {:?}", rel);
-                    match rel.r#type {
-                        RelType::Known(KnownRelType::_64) => {
-                            let name = obj.sym_name(rel.sym)?;
-
-                            let (lib, sym) = self
-                                .lookup_symbol(&name, None)?
-                                .ok_or(RelocationError::UndefinedSymbol(name))?;
-                            let offset = obj.base + rel.offset;
-                            let value = sym.value + lib.base + rel.addend;
-
-                            unsafe {
-                                let ptr: *mut u64 = offset.as_mut_ptr();
-                                *ptr = value.0;
-                            }
-                        }
-                        RelType::Known(KnownRelType::Copy) => {
-                            let name = obj.sym_name(rel.sym)?;
-                            let (lib, sym) =
-                                self.lookup_symbol(&name, Some(obj))?.ok_or_else(|| {
-                                    RelocationError::UndefinedSymbol(name.clone())
-                                })?;
-                            unsafe {
-                                let src = (sym.value + lib.base).as_ptr();
-                                let dst = (rel.offset + obj.base).as_mut_ptr();
-                                std::ptr::copy_nonoverlapping::<u8>(
-                                    src,
-                                    dst,
-                                    sym.size as usize,
-                                );
-                            }
-                        }
-                        RelType::Known(t) => return Err(RelocationError::UnimplementedRelocation(t)),
-                        RelType::Unknown(n) => return Err(RelocationError::UnknownRelocation(n)),
-                    }
-                }
-                Err(e) => println!("Nevermind: {:?}", e),
-            }
+        for rel in rels {
+            self.apply_relocation(rel)?;
         }
-
         Ok(())
     }
 
+    fn apply_relocation(&self, objrel: ObjectRel) -> Result<(), RelocationError> {
+        use RelType as RT;
+
+        let ObjectRel { obj, rel } = objrel;
+        let reltype = rel.r#type;
+        let addend = rel.addend;
+
+        let wanted = ObjectSym {
+            obj,
+            sym: &obj.syms[rel.sym as usize],
+        };
+
+        // When doing a lookup, only ignore the relocation's object if
+        // we're performing a Copy relocation.
+        let ignore_self = matches!(reltype, RT::Copy);
+
+        // Perform symbol lookup early
+        let found = match rel.sym {
+            // The relocation isn't bound to any symbol, go with undef
+            0 => ResolvedSym::Undefined,
+            _ => match self.lookup_symbol(&wanted, ignore_self) {
+                ResolvedSym::Undefined => match wanted.sym.sym.bind {
+                    // Undefined symbols are fine if our local symbol is weak
+                    SymBind::Weak => ResolvedSym::Undefined,
+                    _ => return Err(RelocationError::UndefinedSymbol(format!("{:?}", wanted))),
+                },
+                x => x,
+            },
+        };
+
+        match reltype {
+            RT::_64 => unsafe {
+                objrel.addr().set(found.value() + addend);
+            },
+            RT::Relative => unsafe {
+                objrel.addr().set(obj.base + addend);
+            },
+            RT::Copy => unsafe {
+                objrel.addr().write(found.value().as_slice(found.size()));
+            },
+            _ => return Err(RelocationError::UnimplementedRelocation(reltype)),
+        }
+        Ok(())
+    }
+
+    /// Set the correct protection for the segments of this process
     pub fn adjust_protections(&self) -> Result<(), region::Error> {
         use region::{protect, Protection};
 
@@ -291,6 +330,87 @@ impl Process {
     }
 }
 
+/// An ELF object
+#[derive(CustomDebug)]
+pub struct Object {
+    pub path: PathBuf,
+    pub base: Addr,
+    pub mem_range: Range<Addr>,
+
+    #[debug(skip)]
+    pub file: File,
+    #[debug(skip)]
+    pub segments: Vec<Segment>,
+    #[debug(skip)]
+    pub syms: Vec<NamedSym>,
+    #[debug(skip)]
+    pub sym_map: MultiMap<Name, NamedSym>,
+    #[debug(skip)]
+    pub rels: Vec<Rela>,
+}
+
+/// A segment for an [`Object`]
+#[derive(CustomDebug)]
+pub struct Segment {
+    #[debug(skip)]
+    pub map: MemoryMap,
+    pub padding: Addr,
+    pub flags: BitFlags<SegmentFlag>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NamedSym {
+    sym: Sym,
+    name: Name,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectSym<'a> {
+    obj: &'a Object,
+    sym: &'a NamedSym,
+}
+
+impl ObjectSym<'_> {
+    fn value(&self) -> delf::Addr {
+        self.obj.base + self.sym.sym.value
+    }
+}
+
+#[derive(Debug)]
+pub struct ObjectRel<'a> {
+    obj: &'a Object,
+    rel: &'a Rela,
+}
+
+impl ObjectRel<'_> {
+    fn addr(&self) -> Addr {
+        self.obj.base + self.rel.offset
+    }
+}
+
+#[derive(Debug)]
+enum ResolvedSym<'a> {
+    Defined(ObjectSym<'a>),
+    Undefined,
+}
+
+impl ResolvedSym<'_> {
+    fn value(&self) -> delf::Addr {
+        match self {
+            Self::Defined(sym) => sym.value(),
+            Self::Undefined => delf::Addr(0x0),
+        }
+    }
+
+    fn size(&self) -> usize {
+        match self {
+            // weeeeeee
+            Self::Defined(sym) => sym.sym.sym.size as usize,
+            Self::Undefined => 0,
+        }
+    }
+}
+
 /// Get a range that contains both `a` and `b`
 pub fn convex_hull(a: Range<Addr>, b: Range<Addr>) -> Range<Addr> {
     min(a.start, b.start)..max(a.end, b.end)
@@ -306,28 +426,6 @@ pub fn dump_maps(msg: &str) {
         .filter(|line| line.contains("hello-dl") || line.contains("libmsg.so"))
         .for_each(|line| println!("{}", line));
     println!("=============================");
-}
-
-#[derive(CustomDebug)]
-pub struct Object {
-    pub path: PathBuf,
-    pub base: Addr,
-    pub mem_range: Range<Addr>,
-
-    #[debug(skip)]
-    pub file: File,
-    #[debug(skip)]
-    pub segments: Vec<Segment>,
-    #[debug(skip)]
-    pub syms: Vec<Sym>,
-}
-
-impl Object {
-    pub fn sym_name(&self, index: u32) -> Result<String, RelocationError> {
-        self.file
-            .get_string(self.syms[index as usize].name)
-            .map_err(|_| RelocationError::UnknownSymbolNumber(index))
-    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -346,14 +444,15 @@ pub enum LoadError {
     MapError(#[from] mmap::MapError),
     #[error("Could not read symbols from ELF object: {0}")]
     ReadSymsError(#[from] delf::ReadSymsError),
+    #[error("Could not read relocations from ELF object: {0}")]
+    ReadRelaError(#[from] delf::ReadRelaError),
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum RelocationError {
-    #[error("unknown relocation: {0}")]
-    UnknownRelocation(u32),
     #[error("unimplemented relocation: {0:?}")]
-    UnimplementedRelocation(KnownRelType),
+    UnimplementedRelocation(RelType),
+    #[allow(dead_code)]
     #[error("unknown symbol number: {0}")]
     UnknownSymbolNumber(u32),
     #[error("undefined symbol: {0}")]
@@ -373,12 +472,4 @@ impl GetResult {
             None
         }
     }
-}
-
-#[derive(CustomDebug)]
-pub struct Segment {
-    #[debug(skip)]
-    pub map: MemoryMap,
-    pub padding: Addr,
-    pub flags: BitFlags<SegmentFlag>,
 }

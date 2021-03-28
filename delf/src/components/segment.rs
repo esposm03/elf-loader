@@ -1,6 +1,8 @@
+//! Utilities related to parsing of program headers
+
 use std::{convert::TryFrom, fmt, ops::Range};
 
-use crate::{impl_parse_for_enum, impl_parse_for_enumflags, Addr, parse};
+use crate::{impl_parse_for_enum, impl_parse_for_enumflags, parse, Addr};
 use derive_try_from_primitive::TryFromPrimitive;
 use enumflags2::{bitflags, BitFlags};
 use nom::{
@@ -13,9 +15,6 @@ use nom::{
 /// The program headers are parts of an ELF file useful when executing it.
 /// In a file, there are generally many, each of them referring to a "segment"
 /// (some data in the file and, if the segment is `Load`, in memory)
-///
-///
-///
 pub struct ProgramHeader {
     pub r#type: SegmentType,
     pub flags: BitFlags<SegmentFlag>,
@@ -109,6 +108,7 @@ impl fmt::Debug for ProgramHeader {
     }
 }
 
+/// The flags of a segment
 #[bitflags]
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +120,7 @@ pub enum SegmentFlag {
 
 impl_parse_for_enumflags!(SegmentFlag, le_u32);
 
+/// The type of a segment
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 pub enum SegmentType {

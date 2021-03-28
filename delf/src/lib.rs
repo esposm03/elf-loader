@@ -4,7 +4,9 @@ pub mod components;
 pub mod parse;
 use components::{
     rela::Rela,
+    section::SectionHeader,
     segment::{DynamicEntry, DynamicTag, ProgramHeader, SegmentContents, SegmentType},
+    sym::Sym,
 };
 
 use std::convert::TryFrom;
@@ -19,7 +21,7 @@ use nom::{
     combinator::{map, verify},
     error::context,
     multi::many_m_n,
-    number::complete::{le_u16, le_u32, le_u64, le_u8},
+    number::complete::{le_u16, le_u32, le_u64},
     sequence::tuple,
     Err::{Error, Failure},
     Offset,
@@ -152,23 +154,23 @@ impl File {
         use DynamicTag as DT;
         use ReadRelaError as E;
 
-        let addr = self.dynamic_entry(DT::Rela).ok_or(E::RelaNotFound)?;
-        let len = self.dynamic_entry(DT::RelaSz).ok_or(E::RelaSzNotFound)?;
-        let ent = self.dynamic_entry(DT::RelaEnt).ok_or(E::RelaEntNotFound)?;
+        match self.dynamic_entry(DT::Rela) {
+            None => Ok(vec![]),
+            Some(addr) => {
+                let len = self.get_dynamic_entry(DT::RelaSz)?;
 
-        let i = self.slice_at(addr).ok_or(E::RelaSegmentNotFound)?;
-        let i = &i[..len.into()];
-        let n = (len.0 / ent.0) as usize;
+                let i = self.slice_at(addr).ok_or(E::RelaSegmentNotFound)?;
+                let i = &i[..len.into()];
 
-        match many_m_n(n, n, Rela::parse)(i) {
-            Ok((_, rela_entries)) => Ok(rela_entries),
-            Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
-                let e = &err.errors[0];
-                let (_input, error_kind) = e;
-                Err(E::ParsingError(error_kind.clone()))
+                let n: usize = len.0 as usize / Rela::SIZE;
+                match nom::multi::many_m_n(n, n, Rela::parse)(i) {
+                    Ok((_, rela_entries)) => Ok(rela_entries),
+                    Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
+                        Err(E::ParsingError(format!("{:?}", err)))
+                    }
+                    _ => unreachable!(),
+                }
             }
-            // we don't use any "streaming" parsers, so `nom::Err::Incomplete` seems unlikely
-            _ => unreachable!(),
         }
     }
 
@@ -193,7 +195,7 @@ impl File {
     }
 
     /// Return the dynamic entry with the given type
-    pub fn dynamic_entry(&self, tag: DynamicTag) -> Option<Addr> {
+    fn dynamic_entry(&self, tag: DynamicTag) -> Option<Addr> {
         self.dynamic_entries(tag).next()
     }
 
@@ -215,7 +217,7 @@ impl File {
         use DynamicTag as DT;
         use ReadSymsError as E;
 
-        let addr = self.dynamic_entry(DT::SymTab).ok_or(E::SymTabNotFound)?;
+        let addr = self.get_dynamic_entry(DT::SymTab)?;
         let section = self
             .section_starting_at(addr)
             .ok_or(E::SymTabSectionNotFound)?;
@@ -226,174 +228,34 @@ impl File {
         match many_m_n(n, n, Sym::parse)(i) {
             Ok((_, syms)) => Ok(syms),
             Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
-                let e = &err.errors[0];
-                let (_input, error_kind) = e;
-                Err(E::ParsingError(error_kind.clone()))
+                Err(E::ParsingError(format!("{:?}", err)))
             }
             // we don't use any "streaming" parsers, so.
             _ => unreachable!(),
         }
     }
-}
 
-#[derive(Debug, TryFromPrimitive, Clone, Copy)]
-#[repr(u8)]
-pub enum SymBind {
-    Local = 0,
-    Global = 1,
-    Weak = 2,
-}
-
-#[derive(Debug, TryFromPrimitive, Clone, Copy)]
-#[repr(u8)]
-pub enum SymType {
-    None = 0,
-    Object = 1,
-    Func = 2,
-    Section = 3,
-}
-
-impl SymBind {
-    pub fn parse(i: parse::BitInput) -> parse::BitResult<Option<Self>> {
-        use nom::bits::complete::take;
-        map(take(4_usize), |i: u8| Self::try_from(i).ok())(i)
-    }
-}
-
-impl SymType {
-    pub fn parse(i: parse::BitInput) -> parse::BitResult<Option<Self>> {
-        use nom::bits::complete::take;
-        map(take(4_usize), |i: u8| Self::try_from(i).ok())(i)
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct SectionIndex(pub u16);
-
-impl SectionIndex {
-    pub fn is_undef(&self) -> bool {
-        self.0 == 0
-    }
-
-    pub fn is_special(&self) -> bool {
-        self.0 >= 0xff00
-    }
-
-    pub fn get(&self) -> Option<usize> {
-        if self.is_undef() || self.is_special() {
-            None
-        } else {
-            Some(self.0 as usize)
-        }
-    }
-}
-
-impl fmt::Debug for SectionIndex {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.is_special() {
-            write!(f, "Special({:04x})", self.0)
-        } else if self.is_undef() {
-            write!(f, "Undef")
-        } else {
-            write!(f, "{}", self.0)
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Sym {
-    pub name: Addr,
-    pub bind: Option<SymBind>,
-    pub r#type: Option<SymType>,
-    pub shndx: SectionIndex,
-    pub value: Addr,
-    pub size: u64,
-}
-
-impl Sym {
-    pub fn parse(i: parse::Input) -> parse::Result<Self> {
-        use nom::bits::bits;
-
-        let (i, (name, (bind, r#type), _reserved, shndx, value, size)) = tuple((
-            map(le_u32, |x| Addr(x as u64)),
-            bits(tuple((SymBind::parse, SymType::parse))),
-            le_u8,
-            map(le_u16, SectionIndex),
-            Addr::parse,
-            le_u64,
-        ))(i)?;
-        let res = Self {
-            name,
-            bind,
-            r#type,
-            shndx,
-            value,
-            size,
-        };
-        Ok((i, res))
-    }
-}
-
-#[derive(Debug)]
-pub struct SectionHeader {
-    pub name: Addr,
-    pub r#type: u32,
-    pub flags: u64,
-    pub addr: Addr,
-    pub off: Addr,
-    pub size: Addr,
-    pub link: u32,
-    pub info: u32,
-    pub addralign: Addr,
-    pub entsize: Addr,
-}
-
-impl SectionHeader {
-    pub fn parse(i: parse::Input) -> parse::Result<Self> {
-        let (i, (name, r#type, flags, addr, off, size, link, info, addralign, entsize)) =
-            tuple((
-                map(le_u32, |x| Addr(x as u64)),
-                le_u32,
-                le_u64,
-                Addr::parse,
-                Addr::parse,
-                Addr::parse,
-                le_u32,
-                le_u32,
-                Addr::parse,
-                Addr::parse,
-            ))(i)?;
-        let res = Self {
-            name,
-            r#type,
-            flags,
-            addr,
-            off,
-            size,
-            link,
-            info,
-            addralign,
-            entsize,
-        };
-        Ok((i, res))
+    pub fn get_dynamic_entry(&self, tag: DynamicTag) -> Result<Addr, GetDynamicEntryError> {
+        self.dynamic_entry(tag)
+            .ok_or(GetDynamicEntryError::NotFound(tag))
     }
 }
 
 /// An error that occurred while trying to read relocations
 #[derive(thiserror::Error, Debug)]
 pub enum ReadRelaError {
-    #[error("Rela dynamic entry not found")]
-    RelaNotFound,
-    #[error("RelaSz dynamic entry not found")]
-    RelaSzNotFound,
-    #[error("RelaEnt dynamic entry not found")]
-    RelaEntNotFound,
-    #[error("RelaSeg dynamic entry not found")]
-    RelaSegNotFound,
+    #[error("{0}")]
+    DynamicEntryNotFound(#[from] GetDynamicEntryError),
     #[error("Rela segment not found")]
     RelaSegmentNotFound,
-    #[error("Parsing error")]
-    ParsingError(parse::ErrorKind),
+    #[error("Parsing error: {0}")]
+    ParsingError(String),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum GetDynamicEntryError {
+    #[error("Dynamic entry {0:?} not found")]
+    NotFound(DynamicTag),
 }
 
 /// An error that occurred while trying to read strings from the file
@@ -410,14 +272,14 @@ pub enum GetStringError {
 /// An error that occurred while trying to read symbols
 #[derive(thiserror::Error, Debug)]
 pub enum ReadSymsError {
-    #[error("SymTab dynamic entry not found")]
-    SymTabNotFound,
+    #[error("{0:?}")]
+    DynamicEntryNotFound(#[from] GetDynamicEntryError),
     #[error("SymTab section not found")]
     SymTabSectionNotFound,
     #[error("SymTab segment not found")]
     SymTabSegmentNotFound,
-    #[error("Parsing error")]
-    ParsingError(parse::ErrorKind),
+    #[error("Parsing error: {0}")]
+    ParsingError(String),
 }
 
 /// The type of an ELF file
@@ -468,11 +330,38 @@ impl Addr {
         std::mem::transmute(self.0 as usize)
     }
 
+    /// # Safety
+    ///
+    /// This can create invalid slices
+    pub unsafe fn as_slice<T>(&self, len: usize) -> &[T] {
+        std::slice::from_raw_parts(self.as_ptr(), len)
+    }
+
+    /// # Safety
+    ///
+    /// This can create invalid or aliased mutable slices
+    pub unsafe fn as_mut_slice<T>(&mut self, len: usize) -> &mut [T] {
+        std::slice::from_raw_parts_mut(self.as_mut_ptr(), len)
+    }
+
+    /// # Safety
+    ///
+    /// This can write anywhere
+    pub unsafe fn write(&self, src: &[u8]) {
+        std::ptr::copy_nonoverlapping(src.as_ptr(), self.as_mut_ptr(), src.len());
+    }
+
+    /// # Safety
+    ///
+    /// This can write anywhere
+    pub unsafe fn set<T>(&self, src: T) {
+        *self.as_mut_ptr() = src;
+    }
 }
 
 impl fmt::Debug for Addr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:08x}", self.0)
+        write!(f, "{:016x}", self.0)
     }
 }
 impl fmt::Display for Addr {
