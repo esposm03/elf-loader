@@ -4,7 +4,7 @@ pub mod components;
 pub mod parse;
 use components::{
     rela::Rela,
-    section::SectionHeader,
+    section::{SectionHeader, SectionType},
     segment::{DynamicEntry, DynamicTag, ProgramHeader, SegmentContents, SegmentType},
     sym::Sym,
 };
@@ -35,6 +35,8 @@ pub struct File {
     pub entry_point: Addr,
     pub program_headers: Vec<ProgramHeader>,
     pub section_headers: Vec<SectionHeader>,
+    pub string_table: Vec<u8>,
+    pub sym_table: Vec<u8>,
 }
 
 impl File {
@@ -70,7 +72,7 @@ impl File {
         let (i, ph_count) = u16_usize(i)?;
         let (i, sh_entsize) = u16_usize(i)?;
         let (i, sh_count) = u16_usize(i)?;
-        let (i, _sh_nidx) = u16_usize(i)?;
+        let (i, sh_nidx) = u16_usize(i)?;
 
         let ph_slices = full_input[ph_offset.into()..].chunks(ph_entsize);
         let mut program_headers = Vec::new();
@@ -86,12 +88,26 @@ impl File {
             section_headers.push(sh);
         }
 
+        let offset = section_headers[sh_nidx].off.0 as usize;
+        let len = section_headers[sh_nidx].size.0 as usize;
+        let string_table = Vec::from(&full_input[offset..][..len]);
+
+        let sh_symtab = section_headers
+            .iter()
+            .find(|&sh| sh.r#type == SectionType::SymTab)
+            .expect("No symbol table found");
+        let offset = sh_symtab.off.0 as usize;
+        let len = sh_symtab.size.0 as usize;
+        let sym_table = Vec::from(&full_input[offset..][..len]);
+
         let res = Self {
             typ,
             machine,
             entry_point,
             program_headers,
             section_headers,
+            string_table,
+            sym_table,
         };
         Ok((i, res))
     }
@@ -121,27 +137,30 @@ impl File {
             .find(|ph| ph.mem_range().contains(&addr))
     }
 
+    /// Return a vec of the strings saved in the string table
+    pub fn string_vec(&self) -> Vec<String> {
+        self.string_table
+            .split(|&c| c == 0)
+            .map(|slice| String::from_utf8_lossy(slice).to_string())
+            .collect()
+    }
+
+    /// Return a string, given its index in the string table
+    pub fn string_index(&self, index: usize) -> Option<String> {
+        self.string_vec().get(index).cloned()
+    }
+
+    /// Return a string, given its offset in the string table
+    pub fn string_offset(&self, offset: Addr) -> Option<String> {
+        let res = &self.string_table[offset.0 as usize..];
+        let res = res.split(|&ch| ch == 0).next();
+        res.map(|bytes| String::from_utf8_lossy(bytes).to_string())
+    }
+
     /// Take a slice of data from the given address until the end of its segment
     pub fn slice_at(&self, addr: Addr) -> Option<&[u8]> {
         self.segment_at(addr)
             .map(|seg| &seg.data[(addr - seg.mem_range().start).into()..])
-    }
-
-    /// Get the string at the given offset into the string table
-    pub fn get_string(&self, offset: Addr) -> Result<String, GetStringError> {
-        use DynamicTag as DT;
-        use GetStringError as E;
-
-        let addr = self.dynamic_entry(DT::StrTab).ok_or(E::StrTabNotFound)?;
-        let slice = self
-            .slice_at(addr + offset)
-            .ok_or(E::StrTabSegmentNotFound)?;
-        let string_slice = slice
-            .split(|&c| c == 0x00)
-            .next()
-            .ok_or(E::StringNotFound)?;
-
-        Ok(String::from_utf8_lossy(string_slice).into())
     }
 
     /// Return the first program header whose segment has the specified type
@@ -204,25 +223,27 @@ impl File {
     /// NOTE: This silently drops any string it can't read
     pub fn dynamic_entry_strings(&self, tag: DynamicTag) -> impl Iterator<Item = String> + '_ {
         self.dynamic_entries(tag)
-            .filter_map(move |addr| self.get_string(addr).ok())
+            .filter_map(move |addr| self.string_offset(addr))
+    }
+
+    pub fn section_with(&self, typ: SectionType) -> Option<&SectionHeader> {
+        self.section_headers.iter().find(|&sh| sh.r#type == typ)
     }
 
     /// Return the section starting at the given offset
-    pub fn section_starting_at(&self, addr: Addr) -> Option<&SectionHeader> {
+    pub fn section_at(&self, addr: Addr) -> Option<&SectionHeader> {
         self.section_headers.iter().find(|sh| sh.addr == addr)
     }
 
     /// Return a `Vec` of the symbols defined in this file
     pub fn read_syms(&self) -> Result<Vec<Sym>, ReadSymsError> {
-        use DynamicTag as DT;
         use ReadSymsError as E;
 
-        let addr = self.get_dynamic_entry(DT::SymTab)?;
         let section = self
-            .section_starting_at(addr)
+            .section_with(SectionType::SymTab)
             .ok_or(E::SymTabSectionNotFound)?;
 
-        let i = self.slice_at(addr).ok_or(E::SymTabSegmentNotFound)?;
+        let i = &self.sym_table;
         let n = (section.size.0 / section.entsize.0) as usize;
 
         match many_m_n(n, n, Sym::parse)(i) {
@@ -230,7 +251,6 @@ impl File {
             Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
                 Err(E::ParsingError(format!("{:?}", err)))
             }
-            // we don't use any "streaming" parsers, so.
             _ => unreachable!(),
         }
     }
@@ -272,7 +292,7 @@ pub enum GetStringError {
 /// An error that occurred while trying to read symbols
 #[derive(thiserror::Error, Debug)]
 pub enum ReadSymsError {
-    #[error("{0:?}")]
+    #[error("{0}")]
     DynamicEntryNotFound(#[from] GetDynamicEntryError),
     #[error("SymTab section not found")]
     SymTabSectionNotFound,

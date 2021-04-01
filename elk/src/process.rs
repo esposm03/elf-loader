@@ -67,6 +67,11 @@ impl Process {
             .as_ref()
             .canonicalize()
             .map_err(|e| LoadError::IO(path.as_ref().to_path_buf(), e))?;
+        let origin = path
+            .parent()
+            .ok_or_else(|| LoadError::InvalidPath(path.clone()))?
+            .to_str()
+            .ok_or_else(|| LoadError::InvalidPath(path.clone()))?;
 
         let mut input = vec![];
         let mut fs_file: _ = fs::File::open(&path).map_err(|e| LoadError::IO(path.clone(), e))?;
@@ -77,18 +82,14 @@ impl Process {
         println!("Loading {:?}", path);
         let file = File::parse_or_print_error(&input)
             .ok_or_else(|| LoadError::ParseError(path.clone()))?;
+        println!("Sections: {:#?}", file.section_headers);
+        println!("SymTab name: {}", file.string_offset(Addr(0x1)).unwrap());
 
         let load_segments = || {
             file.program_headers
                 .iter()
                 .filter(|&ph| ph.r#type == SegmentType::Load)
         };
-
-        let origin = path
-            .parent()
-            .ok_or_else(|| LoadError::InvalidPath(path.clone()))?
-            .to_str()
-            .ok_or_else(|| LoadError::InvalidPath(path.clone()))?;
 
         // Add `DT_RUNPATH` members to the search path
         file.dynamic_entry_strings(DynamicTag::Runpath)
@@ -110,7 +111,7 @@ impl Process {
         let mem_size: usize = (mem_range.end - mem_range.start).into();
         let mem_map = MemoryMap::new(mem_size, &[MapOption::MapWritable, MapOption::MapReadable])?;
         let base = Addr(mem_map.data() as _);
-        mem::forget(mem_map);
+        mem::forget(mem_map); // Forget the mapping, so it doesn't get dropped
 
         let segments = load_segments()
             .filter(|&ph| ph.memsz.0 > 0)
@@ -130,6 +131,7 @@ impl Process {
                     ],
                 )?;
 
+                // Zero out BSS
                 if ph.memsz > ph.filesz {
                     let mut zero_start = base + ph.mem_range().start + ph.filesz;
                     let zero_len = ph.memsz - ph.filesz;
@@ -148,14 +150,13 @@ impl Process {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        println!("Pre read symbols");
         let syms = file.read_syms()?;
-        let strtab = file
-            .get_dynamic_entry(DynamicTag::StrTab)
-            .unwrap_or_else(|_| panic!("String table not found in {:?}", path));
+        println!("Read symbols");
         let syms: Vec<_> = syms
             .into_iter()
-            .map(|sym| unsafe {
-                let name = Name::from_addr(base + strtab + sym.name);
+            .map(|sym| {
+                let name = Name::owned(file.string_offset(sym.name).expect("Sym name not found"));
                 NamedSym { sym, name }
             })
             .collect();

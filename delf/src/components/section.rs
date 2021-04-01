@@ -1,20 +1,22 @@
 //! Utilities related to parsing of section headers
 
+use core::convert::TryFrom;
 use core::fmt;
 
+use derive_try_from_primitive::TryFromPrimitive;
 use nom::{
     combinator::map,
     number::complete::{le_u32, le_u64},
     sequence::tuple,
 };
 
-use crate::{parse, Addr};
+use crate::{impl_parse_for_enum, parse, Addr};
 
 /// An header for a section
 #[derive(Debug)]
 pub struct SectionHeader {
     pub name: Addr,
-    pub r#type: u32,
+    pub r#type: SectionType,
     pub flags: u64,
     pub addr: Addr,
     pub off: Addr,
@@ -30,7 +32,7 @@ impl SectionHeader {
         let (i, (name, r#type, flags, addr, off, size, link, info, addralign, entsize)) =
             tuple((
                 map(le_u32, |x| Addr(x as u64)),
-                le_u32,
+                SectionType::parse,
                 le_u64,
                 Addr::parse,
                 Addr::parse,
@@ -55,6 +57,23 @@ impl SectionHeader {
         Ok((i, res))
     }
 }
+
+/// The type of a section
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, TryFromPrimitive, PartialEq)]
+pub enum SectionType {
+    Null = 0x0,
+    Progbits = 0x1,
+    SymTab = 0x2,
+    StrTab = 0x3,
+    Rela = 0x4,
+    Hash = 0x5,
+    Dynamic = 0x6,
+    Note = 0x7,
+    Unknown1 = 0x70000001,
+}
+
+impl_parse_for_enum!(SectionType, le_u32);
 
 #[derive(Clone, Copy)]
 pub struct SectionIndex(pub u16);
