@@ -35,6 +35,7 @@ pub struct File {
     pub entry_point: Addr,
     pub program_headers: Vec<ProgramHeader>,
     pub section_headers: Vec<SectionHeader>,
+    pub full_content: Vec<u8>,
 }
 
 impl File {
@@ -86,12 +87,15 @@ impl File {
             section_headers.push(sh);
         }
 
+        let full_content = full_input.to_vec();
+
         let res = Self {
             typ,
             machine,
             entry_point,
             program_headers,
             section_headers,
+            full_content,
         };
         Ok((i, res))
     }
@@ -125,6 +129,10 @@ impl File {
     pub fn slice_at(&self, addr: Addr) -> Option<&[u8]> {
         self.segment_at(addr)
             .map(|seg| &seg.data[(addr - seg.mem_range().start).into()..])
+    }
+
+    pub fn file_slice_at(&self, addr: Addr) -> Option<&[u8]> {
+        self.full_content.get(addr.0 as usize..)
     }
 
     /// Get the string at the given offset into the string table
@@ -212,23 +220,22 @@ impl File {
         self.section_headers.iter().find(|sh| sh.addr == addr)
     }
 
+    pub fn section_with_type(&self, typ: u32) -> Option<&SectionHeader> {
+        self.section_headers.iter().find(|&sh| sh.r#type == typ)
+    }
+
     /// Return a `Vec` of the symbols defined in this file
     pub fn read_syms(&self) -> Result<Vec<Sym>, ReadSymsError> {
-        use DynamicTag as DT;
-        use ReadSymsError as E;
+        use ReadSymsError::ParsingError;
 
-        let addr = self.get_dynamic_entry(DT::SymTab)?;
-        let section = self
-            .section_starting_at(addr)
-            .ok_or(E::SymTabSectionNotFound)?;
-
-        let i = self.slice_at(addr).ok_or(E::SymTabSegmentNotFound)?;
+        let section = self.section_with_type(2).unwrap();
+        let i = self.file_slice_at(section.off).unwrap();
         let n = (section.size.0 / section.entsize.0) as usize;
 
         match many_m_n(n, n, Sym::parse)(i) {
             Ok((_, syms)) => Ok(syms),
             Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
-                Err(E::ParsingError(format!("{:?}", err)))
+                Err(ParsingError(format!("{:?}", err)))
             }
             // we don't use any "streaming" parsers, so.
             _ => unreachable!(),

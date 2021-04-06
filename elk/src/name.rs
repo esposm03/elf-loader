@@ -3,11 +3,11 @@ use std::hash::{Hash, Hasher};
 
 #[derive(Clone)]
 pub enum Name {
+    #[allow(dead_code)]
     FromAddr {
         addr: delf::Addr,
         len: usize,
     },
-    #[allow(dead_code)]
     Owned(Vec<u8>),
 }
 
@@ -15,6 +15,7 @@ impl Name {
     /// # Safety
     ///
     /// `addr` must point to a null-terminated string, otherwise it's an UB party.
+    #[allow(dead_code)]
     pub unsafe fn from_addr(addr: delf::Addr) -> Self {
         let len = addr
             .as_slice::<u8>(2048)
@@ -24,7 +25,6 @@ impl Name {
         Self::FromAddr { addr, len }
     }
 
-    #[allow(dead_code)]
     pub fn owned<T: Into<Vec<u8>>>(value: T) -> Self {
         Self::Owned(value.into())
     }

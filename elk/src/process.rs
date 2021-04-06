@@ -23,6 +23,7 @@ use delf::{
     components::{
         rela::{RelType, Rela},
         segment::{DynamicTag, SegmentFlag, SegmentType},
+        strtab::string_at,
         sym::{Sym, SymBind},
     },
     Addr, File,
@@ -150,12 +151,15 @@ impl Process {
 
         let syms = file.read_syms()?;
         let strtab = file
-            .get_dynamic_entry(DynamicTag::StrTab)
-            .unwrap_or_else(|_| panic!("String table not found in {:?}", path));
+            .section_with_type(3)
+            .unwrap_or_else(|| panic!("String table not found in {:?}", path));
+
+        let strtab_slice = &file.full_content[strtab.off.0 as usize..][..strtab.size.0 as usize];
+
         let syms: Vec<_> = syms
             .into_iter()
-            .map(|sym| unsafe {
-                let name = Name::from_addr(base + strtab + sym.name);
+            .map(|sym| {
+                let name = Name::owned(string_at(strtab_slice, sym.name).unwrap());
                 NamedSym { sym, name }
             })
             .collect();
