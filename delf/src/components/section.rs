@@ -1,20 +1,22 @@
 //! Utilities related to parsing of section headers
 
 use core::fmt;
+use std::convert::TryFrom;
 
 use nom::{
     combinator::map,
     number::complete::{le_u32, le_u64},
     sequence::tuple,
 };
+use derive_try_from_primitive::TryFromPrimitive;
 
-use crate::{parse, Addr};
+use crate::{Addr, impl_parse_for_enum, parse};
 
 /// An header for a section
 #[derive(Debug)]
 pub struct SectionHeader {
     pub name: Addr,
-    pub r#type: u32,
+    pub r#type: SectionType,
     pub flags: u64,
     pub addr: Addr,
     pub off: Addr,
@@ -30,7 +32,7 @@ impl SectionHeader {
         let (i, (name, r#type, flags, addr, off, size, link, info, addralign, entsize)) =
             tuple((
                 map(le_u32, |x| Addr(x as u64)),
-                le_u32,
+                SectionType::parse,
                 le_u64,
                 Addr::parse,
                 Addr::parse,
@@ -88,3 +90,24 @@ impl fmt::Debug for SectionIndex {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive)]
+#[repr(u32)]
+pub enum SectionType {
+    Null = 0,
+    ProgBits = 1,
+    SymTab = 2,
+    StrTab = 3,
+    Rela = 4,
+    Dynamic = 6,
+    Note = 7,
+    NoBits = 8,
+    DynSym = 11,
+    Unknown4 = 14,
+    Unknown5 = 15,
+    Unknown1 = 0x6fff_fff6,
+    Unknown2 = 0x6fff_fffe,
+    Unknown3 = 0x6fff_ffff,
+}
+
+impl_parse_for_enum!(SectionType, le_u32);

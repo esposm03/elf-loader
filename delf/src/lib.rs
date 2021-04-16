@@ -4,8 +4,9 @@ pub mod components;
 pub mod parse;
 use components::{
     rela::Rela,
-    section::SectionHeader,
+    section::{SectionHeader, SectionType},
     segment::{DynamicEntry, DynamicTag, ProgramHeader, SegmentContents, SegmentType},
+    strtab::string_at,
     sym::Sym,
 };
 
@@ -36,6 +37,9 @@ pub struct File {
     pub program_headers: Vec<ProgramHeader>,
     pub section_headers: Vec<SectionHeader>,
     pub full_content: Vec<u8>,
+
+    pub shstrtab: Vec<u8>,
+    pub strtab: Vec<u8>,
 }
 
 impl File {
@@ -71,7 +75,7 @@ impl File {
         let (i, ph_count) = u16_usize(i)?;
         let (i, sh_entsize) = u16_usize(i)?;
         let (i, sh_count) = u16_usize(i)?;
-        let (i, _sh_nidx) = u16_usize(i)?;
+        let (i, sh_nidx) = u16_usize(i)?;
 
         let ph_slices = full_input[ph_offset.into()..].chunks(ph_entsize);
         let mut program_headers = Vec::new();
@@ -89,6 +93,11 @@ impl File {
 
         let full_content = full_input.to_vec();
 
+        let shstrtab = {
+            let sh = &section_headers[sh_nidx];
+            full_content[sh.off.0 as usize..][..sh.size.0 as usize].to_vec()
+        };
+
         let res = Self {
             typ,
             machine,
@@ -96,6 +105,7 @@ impl File {
             program_headers,
             section_headers,
             full_content,
+            shstrtab,
         };
         Ok((i, res))
     }
@@ -115,6 +125,23 @@ impl File {
             }
             Err(_) => panic!("unexpected nom error"),
         }
+    }
+
+    /// Get a string from the section headers string table
+    pub fn shstrtab_string(&self, offset: Addr) -> Option<String> {
+        string_at(&self.shstrtab, offset)
+    }
+
+    /// Get the `.strtab` section
+    pub fn strtab_section(&self) -> Option<&SectionHeader> {
+        self.section_headers.iter().find(|&sh| {
+            sh.r#type == SectionType::StrTab && self.shstrtab_string(sh.name) == Some(".strtab".into())
+        })
+    }
+
+    /// Get a string from `.strtab`
+    pub fn strtab_string(&self, offset: Addr) -> Option<&String> {
+        self.strtab[]
     }
 
     /// Return the program header whose segment contains the given address
@@ -220,7 +247,7 @@ impl File {
         self.section_headers.iter().find(|sh| sh.addr == addr)
     }
 
-    pub fn section_with_type(&self, typ: u32) -> Option<&SectionHeader> {
+    pub fn section_with_type(&self, typ: SectionType) -> Option<&SectionHeader> {
         self.section_headers.iter().find(|&sh| sh.r#type == typ)
     }
 
@@ -228,7 +255,7 @@ impl File {
     pub fn read_syms(&self) -> Result<Vec<Sym>, ReadSymsError> {
         use ReadSymsError::ParsingError;
 
-        let section = self.section_with_type(2).unwrap();
+        let section = self.section_with_type(SectionType::SymTab).unwrap();
         let i = self.file_slice_at(section.off).unwrap();
         let n = (section.size.0 / section.entsize.0) as usize;
 
