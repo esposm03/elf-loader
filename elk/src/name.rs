@@ -1,6 +1,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub enum Name {
     #[allow(dead_code)]

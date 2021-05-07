@@ -6,7 +6,7 @@ use components::{
     rela::Rela,
     section::{SectionHeader, SectionType},
     segment::{DynamicEntry, DynamicTag, ProgramHeader, SegmentContents, SegmentType},
-    strtab::string_at,
+    strtab::StrTab,
     sym::Sym,
 };
 
@@ -38,8 +38,8 @@ pub struct File {
     pub section_headers: Vec<SectionHeader>,
     pub full_content: Vec<u8>,
 
-    pub shstrtab: Vec<u8>,
-    pub strtab: Vec<u8>,
+    pub shstrtab: StrTab<'static>,
+    pub strtab: StrTab<'static>,
 }
 
 impl File {
@@ -95,7 +95,19 @@ impl File {
 
         let shstrtab = {
             let sh = &section_headers[sh_nidx];
-            full_content[sh.off.0 as usize..][..sh.size.0 as usize].to_vec()
+            let data = full_content[sh.off.0 as usize..][..sh.size.0 as usize].to_vec();
+            StrTab::new(data)
+        };
+
+        let strtab = {
+            let sh = section_headers.iter().find(|&sh| {
+                sh.r#type == SectionType::StrTab
+                    && shstrtab.at(sh.name) == Some(".strtab".into())
+            })
+            .expect("Binary doesn't contain `.strtab` section");
+
+            let data = full_content[sh.off.0 as usize..][..sh.size.0 as usize].to_vec();
+            StrTab::new(data)
         };
 
         let res = Self {
@@ -106,6 +118,7 @@ impl File {
             section_headers,
             full_content,
             shstrtab,
+            strtab,
         };
         Ok((i, res))
     }
@@ -127,21 +140,11 @@ impl File {
         }
     }
 
-    /// Get a string from the section headers string table
-    pub fn shstrtab_string(&self, offset: Addr) -> Option<String> {
-        string_at(&self.shstrtab, offset)
-    }
-
     /// Get the `.strtab` section
     pub fn strtab_section(&self) -> Option<&SectionHeader> {
         self.section_headers.iter().find(|&sh| {
-            sh.r#type == SectionType::StrTab && self.shstrtab_string(sh.name) == Some(".strtab".into())
+            sh.r#type == SectionType::StrTab && self.shstrtab.at(sh.name) == Some(".strtab".into())
         })
-    }
-
-    /// Get a string from `.strtab`
-    pub fn strtab_string(&self, offset: Addr) -> Option<&String> {
-        self.strtab[]
     }
 
     /// Return the program header whose segment contains the given address

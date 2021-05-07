@@ -19,7 +19,14 @@ use custom_debug_derive::Debug as CustomDebug;
 use enumflags2::BitFlags;
 use mmap::{MapOption, MemoryMap};
 
-use delf::{Addr, File, components::{rela::{RelType, Rela}, section::SectionType, segment::{DynamicTag, SegmentFlag, SegmentType}, strtab::string_at, sym::{Sym, SymBind}}};
+use delf::{
+    components::{
+        rela::{RelType, Rela},
+        segment::{DynamicTag, SegmentFlag, SegmentType},
+        sym::{Sym, SymBind},
+    },
+    Addr, File,
+};
 use multimap::MultiMap;
 
 /// An executable process in memory
@@ -142,20 +149,10 @@ impl Process {
             .collect::<Result<Vec<_>, _>>()?;
 
         let syms = file.read_syms()?;
-        let strtab = file
-            .strtab_section()
-            .unwrap_or_else(|| panic!("String table not found in {:?}", path));
-
-        let strtab_slice = &file.full_content[strtab.off.0 as usize..][..strtab.size.0 as usize];
-
         let syms: Vec<_> = syms
             .into_iter()
             .map(|sym| {
-                let name = Name::owned(string_at(strtab_slice, sym.name).expect(&format!(
-                    "couldn't load offset {:?} in slice {:x?}",
-                    sym.name,
-                    &strtab_slice[0x86..]
-                )));
+                let name = Name::owned(file.strtab.at(sym.name).expect("No symbol name").as_bytes());
                 NamedSym { sym, name }
             })
             .collect();
