@@ -81,7 +81,7 @@ impl Process {
         let load_segments = || {
             file.program_headers
                 .iter()
-                .filter(|&ph| ph.r#type == SegmentType::Load)
+                .filter(|&ph| ph.typ == SegmentType::Load)
         };
 
         let origin = path
@@ -252,6 +252,8 @@ impl Process {
             .map(|obj| obj.rels.iter().map(move |rel| ObjectRel { obj, rel }))
             .flatten()
             .collect();
+
+        println!("Relocations: {:#?}", rels);
 
         for rel in rels {
             self.apply_relocation(rel)?;

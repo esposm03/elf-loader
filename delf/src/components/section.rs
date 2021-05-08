@@ -102,6 +102,7 @@ pub enum SectionType {
     Dynamic = 6,
     Note = 7,
     NoBits = 8,
+    Rel = 9,
     DynSym = 11,
     Unknown4 = 14,
     Unknown5 = 15,

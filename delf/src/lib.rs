@@ -10,8 +10,8 @@ use components::{
     sym::Sym,
 };
 
-use std::convert::TryFrom;
 use std::fmt;
+use std::{convert::TryFrom, usize};
 
 use derive_more::*;
 use derive_try_from_primitive::TryFromPrimitive;
@@ -100,11 +100,13 @@ impl File {
         };
 
         let strtab = {
-            let sh = section_headers.iter().find(|&sh| {
-                sh.r#type == SectionType::StrTab
-                    && shstrtab.at(sh.name) == Some(".strtab".into())
-            })
-            .expect("Binary doesn't contain `.strtab` section");
+            let sh = section_headers
+                .iter()
+                .find(|&sh| {
+                    sh.r#type == SectionType::StrTab
+                        && shstrtab.at(sh.name) == Some(".strtab".into())
+                })
+                .expect("Binary doesn't contain `.strtab` section");
 
             let data = full_content[sh.off.0 as usize..][..sh.size.0 as usize].to_vec();
             StrTab::new(data)
@@ -140,76 +142,67 @@ impl File {
         }
     }
 
-    /// Get the `.strtab` section
-    pub fn strtab_section(&self) -> Option<&SectionHeader> {
-        self.section_headers.iter().find(|&sh| {
-            sh.r#type == SectionType::StrTab && self.shstrtab.at(sh.name) == Some(".strtab".into())
-        })
-    }
-
     /// Return the program header whose segment contains the given address
     pub fn segment_at(&self, addr: Addr) -> Option<&ProgramHeader> {
         self.program_headers
             .iter()
-            .filter(|ph| ph.r#type == SegmentType::Load)
+            .filter(|ph| ph.typ == SegmentType::Load)
             .find(|ph| ph.mem_range().contains(&addr))
     }
 
     /// Take a slice of data from the given address until the end of its segment
-    pub fn slice_at(&self, addr: Addr) -> Option<&[u8]> {
+    pub fn mem_slice_at(&self, addr: Addr) -> Option<&[u8]> {
         self.segment_at(addr)
             .map(|seg| &seg.data[(addr - seg.mem_range().start).into()..])
     }
 
+    /// Take a slice of data from the given address until the end of its segment
     pub fn file_slice_at(&self, addr: Addr) -> Option<&[u8]> {
         self.full_content.get(addr.0 as usize..)
     }
 
-    /// Get the string at the given offset into the string table
-    pub fn get_string(&self, offset: Addr) -> Result<String, GetStringError> {
-        use DynamicTag as DT;
-        use GetStringError as E;
+    /// Read the `Rel` table
+    pub fn read_rel(&self) -> Result<Vec<Rela>, ReadRelaError> {
+        let sh = self.section_with_type(SectionType::Rel).ok_or(ReadRelaError::RelSegmentNotFound)?;
 
-        let addr = self.dynamic_entry(DT::StrTab).ok_or(E::StrTabNotFound)?;
-        let slice = self
-            .slice_at(addr + offset)
-            .ok_or(E::StrTabSegmentNotFound)?;
-        let string_slice = slice
-            .split(|&c| c == 0x00)
-            .next()
-            .ok_or(E::StringNotFound)?;
+        let i = &self.full_content[sh.off.0 as usize..][..sh.size.0 as usize];
 
-        Ok(String::from_utf8_lossy(string_slice).into())
+        let n: usize = i.len() / 16; // A `Rel` occupies 16 bytes
+        match nom::multi::many_m_n(n, n, Rela::parse_rel)(i) {
+            Ok((_, rela_entries)) => Ok(rela_entries),
+            Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
+                Err(ReadRelaError::ParsingError(format!("{:?}", err)))
+            }
+            _ => unreachable!(),
+        }
     }
 
-    /// Return the first program header whose segment has the specified type
-    pub fn segment_of_type(&self, r#type: SegmentType) -> Option<&ProgramHeader> {
-        self.program_headers.iter().find(|ph| ph.r#type == r#type)
+    /// Read the `Rela` table
+    pub fn read_rela(&self) -> Result<Vec<Rela>, ReadRelaError> {
+        let sh = self.section_with_type(SectionType::Rela).ok_or(ReadRelaError::RelaSegmentNotFound)?;
+
+        let i = &self.full_content[sh.off.0 as usize..][..sh.size.0 as usize];
+
+        let n: usize = i.len() / 24; // A `Rela` occupies 24 bytes
+        match nom::multi::many_m_n(n, n, Rela::parse)(i) {
+            Ok((_, rela_entries)) => Ok(rela_entries),
+            Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
+                Err(ReadRelaError::ParsingError(format!("{:?}", err)))
+            }
+            _ => unreachable!(),
+        }
     }
 
     /// Read the relocation table
     pub fn read_rela_entries(&self) -> Result<Vec<Rela>, ReadRelaError> {
-        use DynamicTag as DT;
-        use ReadRelaError as E;
+        let mut res = self.read_rel().unwrap_or(vec![]);
+        res.extend(self.read_rela()?);
+        Ok(res)
+    }
 
-        match self.dynamic_entry(DT::Rela) {
-            None => Ok(vec![]),
-            Some(addr) => {
-                let len = self.get_dynamic_entry(DT::RelaSz)?;
-
-                let i = self.slice_at(addr).ok_or(E::RelaSegmentNotFound)?;
-                let i = &i[..len.into()];
-
-                let n: usize = len.0 as usize / Rela::SIZE;
-                match nom::multi::many_m_n(n, n, Rela::parse)(i) {
-                    Ok((_, rela_entries)) => Ok(rela_entries),
-                    Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
-                        Err(E::ParsingError(format!("{:?}", err)))
-                    }
-                    _ => unreachable!(),
-                }
-            }
-        }
+    /// Return the first program header whose segment has the specified type
+    pub fn segment_of_type(&self, typ: SegmentType) -> Option<&ProgramHeader> {
+        self.program_headers.iter().find(|ph| ph.typ == typ)
     }
 
     /// Get the dynamic table of this ELF file
@@ -242,7 +235,7 @@ impl File {
     /// NOTE: This silently drops any string it can't read
     pub fn dynamic_entry_strings(&self, tag: DynamicTag) -> impl Iterator<Item = String> + '_ {
         self.dynamic_entries(tag)
-            .filter_map(move |addr| self.get_string(addr).ok())
+            .filter_map(move |addr| self.strtab.at(addr))
     }
 
     /// Return the section starting at the given offset
@@ -283,8 +276,10 @@ impl File {
 pub enum ReadRelaError {
     #[error("{0}")]
     DynamicEntryNotFound(#[from] GetDynamicEntryError),
-    #[error("Rela segment not found")]
+    #[error("Object file does not contain a `SHT_RELA` section")]
     RelaSegmentNotFound,
+    #[error("Object file does not contain a `SHT_REL` section")]
+    RelSegmentNotFound,
     #[error("Parsing error: {0}")]
     ParsingError(String),
 }
