@@ -29,6 +29,7 @@ pub enum SymType {
     Func = 2,
     Section = 3,
     File = 4,
+    Unknown1 = 10,
 }
 
 impl_parse_for_bitenum!(SymBind, 4_usize);

@@ -1,13 +1,5 @@
 **/target
 **/Cargo.lock
 
-elk/samples/nodata
-elk/samples/entry-point
-elk/samples/rel-pie
-elk/samples/abs-pie
-elk/samples/dl
-elk/samples/libmsg.so
-elk/samples/bss
-elk/samples/bss2
-elk/samples/bss3
-elk/samples/nolibc
+elk/samples/*
+!elk/samples/src

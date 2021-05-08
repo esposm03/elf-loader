@@ -10,7 +10,7 @@ use nom::{
     sequence::tuple,
 };
 
-use crate::{impl_parse_for_enum, parse, Addr};
+use crate::{Addr, impl_parse_for_enum, parse};
 
 /// An header for a section
 #[derive(Debug)]
@@ -58,23 +58,6 @@ impl SectionHeader {
     }
 }
 
-/// The type of a section
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, TryFromPrimitive, PartialEq)]
-pub enum SectionType {
-    Null = 0x0,
-    Progbits = 0x1,
-    SymTab = 0x2,
-    StrTab = 0x3,
-    Rela = 0x4,
-    Hash = 0x5,
-    Dynamic = 0x6,
-    Note = 0x7,
-    Unknown1 = 0x70000001,
-}
-
-impl_parse_for_enum!(SectionType, le_u32);
-
 #[derive(Clone, Copy)]
 pub struct SectionIndex(pub u16);
 
@@ -107,3 +90,25 @@ impl fmt::Debug for SectionIndex {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive)]
+#[repr(u32)]
+pub enum SectionType {
+    Null = 0,
+    ProgBits = 1,
+    SymTab = 2,
+    StrTab = 3,
+    Rela = 4,
+    Dynamic = 6,
+    Note = 7,
+    NoBits = 8,
+    Rel = 9,
+    DynSym = 11,
+    Unknown4 = 14,
+    Unknown5 = 15,
+    Unknown1 = 0x6fff_fff6,
+    Unknown2 = 0x6fff_fffe,
+    Unknown3 = 0x6fff_ffff,
+}
+
+impl_parse_for_enum!(SectionType, le_u32);

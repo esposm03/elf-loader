@@ -82,13 +82,11 @@ impl Process {
         println!("Loading {:?}", path);
         let file = File::parse_or_print_error(&input)
             .ok_or_else(|| LoadError::ParseError(path.clone()))?;
-        println!("Sections: {:#?}", file.section_headers);
-        println!("SymTab name: {}", file.string_offset(Addr(0x1)).unwrap());
 
         let load_segments = || {
             file.program_headers
                 .iter()
-                .filter(|&ph| ph.r#type == SegmentType::Load)
+                .filter(|&ph| ph.typ == SegmentType::Load)
         };
 
         // Add `DT_RUNPATH` members to the search path
@@ -150,13 +148,11 @@ impl Process {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        println!("Pre read symbols");
         let syms = file.read_syms()?;
-        println!("Read symbols");
         let syms: Vec<_> = syms
             .into_iter()
             .map(|sym| {
-                let name = Name::owned(file.string_offset(sym.name).expect("Sym name not found"));
+                let name = Name::owned(file.strtab.at(sym.name).expect("No symbol name").as_bytes());
                 NamedSym { sym, name }
             })
             .collect();

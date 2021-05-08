@@ -15,10 +15,10 @@ fn do_main() -> Result<(), Box<dyn Error>> {
 
     let mut proc = Process::new();
     let exec = proc.load_obj_and_deps(&input_path)?;
-    println!("Obj and deps loaded");
     proc.apply_relocations()?;
     proc.adjust_protections()?;
 
+    println!("Jumping");
     let obj = &proc.objects[exec];
     let entry_point: delf::Addr = obj.file.entry_point + obj.base;
     unsafe { jmp(entry_point.as_ptr()) }

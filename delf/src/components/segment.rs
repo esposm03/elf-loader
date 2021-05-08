@@ -16,7 +16,7 @@ use nom::{
 /// In a file, there are generally many, each of them referring to a "segment"
 /// (some data in the file and, if the segment is `Load`, in memory)
 pub struct ProgramHeader {
-    pub r#type: SegmentType,
+    pub typ: SegmentType,
     pub flags: BitFlags<SegmentFlag>,
     pub offset: Addr,
     pub vaddr: Addr,
@@ -65,7 +65,7 @@ impl ProgramHeader {
         };
 
         let res = Self {
-            r#type,
+            typ: r#type,
             flags,
             offset,
             vaddr,
@@ -103,7 +103,7 @@ impl fmt::Debug for ProgramHeader {
             })
             .collect::<Vec<_>>()
             .join(""),
-            self.r#type,
+            self.typ,
         )
     }
 }

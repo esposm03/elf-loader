@@ -30,6 +30,18 @@ impl Rela {
             },
         )(i)
     }
+
+    pub fn parse_rel(i: parse::Input) -> parse::Result<Self> {
+        map(
+            tuple((Addr::parse, RelType::parse, le_u32)),
+            |(offset, r#type, sym)| Rela {
+                offset,
+                r#type,
+                sym,
+                addend: Addr::from(0),
+            },
+        )(i)
+    }
 }
 
 /// The type of a relocation
@@ -41,5 +53,6 @@ pub enum RelType {
     GlobDat = 6,
     JumpSlot = 7,
     Relative = 8,
+    IRelative = 37,
 }
 impl_parse_for_enum!(RelType, le_u32);
