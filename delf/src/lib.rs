@@ -28,75 +28,29 @@ use nom::{
     Offset,
 };
 
+use crate::components::rela::Rel;
+
 /// An ELF file
 #[derive(Debug)]
-pub struct File {
-    pub typ: ElfType,
-    pub machine: Machine,
-    pub entry_point: Addr,
+pub struct ParsedElf<'a> {
+    pub elf_header: ElfHeader,
     pub program_headers: Vec<ProgramHeader>,
     pub section_headers: Vec<SectionHeader>,
-    pub full_content: Vec<u8>,
+    pub full_content: &'a [u8],
 
-    pub shstrtab: StrTab<'static>,
-    pub strtab: StrTab<'static>,
+    pub shstrtab: StrTab<'a>,
+    pub strtab: StrTab<'a>,
 }
 
-impl File {
-    const MAGIC: &'static [u8] = &[0x7F, 0x45, 0x4C, 0x46];
-
+impl<'a> ParsedElf<'a> {
     /// Parse an Elf file given some bytes
-    pub fn parse(i: parse::Input) -> parse::Result<Self> {
-        let full_input = i;
-
-        // Parser taking a `u16`, but outputting it as a `usize`
-        let u16_usize: _ = map(le_u16, |x| x as usize);
-
-        let (i, _) = tuple((
-            context("Magic", tag(Self::MAGIC)),
-            context("Class not 64bit", tag(&[0x2])),
-            context("Endianness not little", tag(&[0x1])),
-            context("Version not 1", tag(&[0x1])),
-            context("OS ABI not sysv/linux", alt((tag(&[0x0]), tag(&[0x3])))),
-            context("Padding", take(8usize)),
-        ))(i)?;
-
-        let (i, typ) = ElfType::parse(i)?;
-        let (i, machine) = Machine::parse(i)?;
-        let (i, _) = context("Version (bis)", verify(le_u32, |&x| x == 1))(i)?;
-        let (i, entry_point) = Addr::parse(i)?;
-
-        // Section headers and program headers
-        let (i, ph_offset) = Addr::parse(i)?;
-        let (i, sh_offset) = Addr::parse(i)?;
-        let (i, _flags) = le_u32(i)?;
-        let (i, _hdr_size) = le_u16(i)?;
-        let (i, ph_entsize) = u16_usize(i)?;
-        let (i, ph_count) = u16_usize(i)?;
-        let (i, sh_entsize) = u16_usize(i)?;
-        let (i, sh_count) = u16_usize(i)?;
-        let (i, sh_nidx) = u16_usize(i)?;
-
-        let ph_slices = full_input[ph_offset.into()..].chunks(ph_entsize);
-        let mut program_headers = Vec::new();
-        for ph_slice in ph_slices.take(ph_count) {
-            let (_, ph) = ProgramHeader::parse(full_input, ph_slice)?;
-            program_headers.push(ph);
-        }
-
-        let sh_slices = (&full_input[sh_offset.into()..]).chunks(sh_entsize);
-        let mut section_headers = Vec::new();
-        for sh_slice in sh_slices.take(sh_count) {
-            let (_, sh) = SectionHeader::parse(sh_slice)?;
-            section_headers.push(sh);
-        }
-
-        let full_content = full_input.to_vec();
+    pub fn parse(input: parse::Input<'a>) -> parse::Result<Self> {
+        let (i, (elf_header, program_headers, section_headers)) = ElfHeader::parse(input)?;
 
         let shstrtab = {
-            let sh = &section_headers[sh_nidx];
-            let data = full_content[sh.off.0 as usize..][..sh.size.0 as usize].to_vec();
-            StrTab::new(data)
+            let sh = &section_headers[elf_header.sh_nidx];
+            let data = &input[sh.off.0 as usize..][..sh.size.0 as usize];
+            StrTab::new_borrowed(data)
         };
 
         let strtab = {
@@ -108,17 +62,16 @@ impl File {
                 })
                 .expect("Binary doesn't contain `.strtab` section");
 
-            let data = full_content[sh.off.0 as usize..][..sh.size.0 as usize].to_vec();
-            StrTab::new(data)
+            let data = &input[sh.off.0 as usize..][..sh.size.0 as usize];
+            StrTab::new_borrowed(data)
         };
 
         let res = Self {
-            typ,
-            machine,
-            entry_point,
+            elf_header,
             program_headers,
             section_headers,
-            full_content,
+            full_content: input,
+
             shstrtab,
             strtab,
         };
@@ -126,7 +79,7 @@ impl File {
     }
 
     /// Parse an Elf file, or report a (somewhat) user-friendly error
-    pub fn parse_or_print_error(i: parse::Input) -> Option<Self> {
+    pub fn parse_or_print_error(i: parse::Input<'a>) -> Option<Self> {
         match Self::parse(i) {
             Ok((_, file)) => Some(file),
             Err(Failure(err)) | Err(Error(err)) => {
@@ -162,13 +115,15 @@ impl File {
     }
 
     /// Read the `Rel` table
-    pub fn read_rel(&self) -> Result<Vec<Rela>, ReadRelaError> {
-        let sh = self.section_with_type(SectionType::Rel).ok_or(ReadRelaError::RelSegmentNotFound)?;
+    pub fn read_rel(&self) -> Result<Vec<Rel>, ReadRelaError> {
+        let sh = self
+            .section_with_type(SectionType::Rel)
+            .ok_or(ReadRelaError::RelSegmentNotFound)?;
 
         let i = &self.full_content[sh.off.0 as usize..][..sh.size.0 as usize];
 
         let n: usize = i.len() / 16; // A `Rel` occupies 16 bytes
-        match nom::multi::many_m_n(n, n, Rela::parse_rel)(i) {
+        match nom::multi::many_m_n(n, n, Rel::parse)(i) {
             Ok((_, rela_entries)) => Ok(rela_entries),
             Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
                 Err(ReadRelaError::ParsingError(format!("{:?}", err)))
@@ -179,7 +134,9 @@ impl File {
 
     /// Read the `Rela` table
     pub fn read_rela(&self) -> Result<Vec<Rela>, ReadRelaError> {
-        let sh = self.section_with_type(SectionType::Rela).ok_or(ReadRelaError::RelaSegmentNotFound)?;
+        let sh = self
+            .section_with_type(SectionType::Rela)
+            .ok_or(ReadRelaError::RelaSegmentNotFound)?;
 
         let i = &self.full_content[sh.off.0 as usize..][..sh.size.0 as usize];
 
@@ -191,13 +148,6 @@ impl File {
             }
             _ => unreachable!(),
         }
-    }
-
-    /// Read the relocation table
-    pub fn read_rela_entries(&self) -> Result<Vec<Rela>, ReadRelaError> {
-        let mut res = self.read_rel().unwrap_or(vec![]);
-        res.extend(self.read_rela()?);
-        Ok(res)
     }
 
     /// Return the first program header whose segment has the specified type
@@ -238,11 +188,6 @@ impl File {
             .filter_map(move |addr| self.strtab.at(addr))
     }
 
-    /// Return the section starting at the given offset
-    pub fn section_at(&self, addr: Addr) -> Option<&SectionHeader> {
-        self.section_headers.iter().find(|sh| sh.addr == addr)
-    }
-
     pub fn section_with_type(&self, typ: SectionType) -> Option<&SectionHeader> {
         self.section_headers.iter().find(|&sh| sh.r#type == typ)
     }
@@ -267,6 +212,89 @@ impl File {
     pub fn get_dynamic_entry(&self, tag: DynamicTag) -> Result<Addr, GetDynamicEntryError> {
         self.dynamic_entry(tag)
             .ok_or(GetDynamicEntryError::NotFound(tag))
+    }
+}
+
+/// The ELF header
+#[derive(Debug)]
+pub struct ElfHeader {
+    pub typ: ElfType,
+    pub machine: Machine,
+    pub entry_point: Addr,
+    pub ph_offset: Addr,
+    pub sh_offset: Addr,
+    pub flags: u32,
+    pub hdr_size: u16,
+    pub ph_entsize: usize,
+    pub ph_count: usize,
+    pub sh_entsize: usize,
+    pub sh_count: usize,
+    pub sh_nidx: usize,
+}
+
+impl ElfHeader {
+    const MAGIC: &'static [u8] = &[0x7F, 0x45, 0x4C, 0x46];
+
+    pub fn parse(i: parse::Input) -> parse::Result<(Self, Vec<ProgramHeader>, Vec<SectionHeader>)> {
+        let full_input = i;
+
+        // Parser taking a `u16`, but outputting it as a `usize`
+        let u16_usize = map(le_u16, |x| x as usize);
+
+        let (i, _) = tuple((
+            context("Magic", tag(Self::MAGIC)),
+            context("Class not 64bit", tag(&[0x2])),
+            context("Endianness not little", tag(&[0x1])),
+            context("Version not 1", tag(&[0x1])),
+            context("OS ABI not sysv/linux", alt((tag(&[0x0]), tag(&[0x3])))),
+            context("Padding", take(8usize)),
+        ))(i)?;
+
+        let (i, typ) = ElfType::parse(i)?;
+        let (i, machine) = Machine::parse(i)?;
+        let (i, _) = context("Version (bis)", verify(le_u32, |&x| x == 1))(i)?;
+        let (i, entry_point) = Addr::parse(i)?;
+
+        // Section headers and program headers
+        let (i, ph_offset) = Addr::parse(i)?;
+        let (i, sh_offset) = Addr::parse(i)?;
+        let (i, flags) = le_u32(i)?;
+        let (i, hdr_size) = le_u16(i)?;
+        let (i, ph_entsize) = u16_usize(i)?;
+        let (i, ph_count) = u16_usize(i)?;
+        let (i, sh_entsize) = u16_usize(i)?;
+        let (i, sh_count) = u16_usize(i)?;
+        let (i, sh_nidx) = u16_usize(i)?;
+
+        let ph_slices = full_input[ph_offset.into()..].chunks(ph_entsize);
+        let mut program_headers = Vec::new();
+        for ph_slice in ph_slices.take(ph_count) {
+            let (_, ph) = ProgramHeader::parse(full_input, ph_slice)?;
+            program_headers.push(ph);
+        }
+
+        let sh_slices = (&full_input[sh_offset.into()..]).chunks(sh_entsize);
+        let mut section_headers = Vec::new();
+        for sh_slice in sh_slices.take(sh_count) {
+            let (_, sh) = SectionHeader::parse(sh_slice)?;
+            section_headers.push(sh);
+        }
+
+        let file_header = Self {
+            typ,
+            machine,
+            entry_point,
+            ph_offset,
+            sh_offset,
+            flags,
+            hdr_size,
+            ph_entsize,
+            ph_count,
+            sh_entsize,
+            sh_count,
+            sh_nidx,
+        };
+        Ok((i, (file_header, program_headers, section_headers)))
     }
 }
 

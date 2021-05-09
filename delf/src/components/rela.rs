@@ -5,13 +5,13 @@ use std::convert::TryFrom;
 use derive_try_from_primitive::TryFromPrimitive;
 use nom::{combinator::map, number::complete::le_u32, sequence::tuple};
 
-use crate::{impl_parse_for_enum, parse, Addr};
+use crate::{Addr, impl_parse_for_enum, parse};
 
 /// A relocation
 #[derive(Debug)]
 pub struct Rela {
     pub offset: Addr,
-    pub r#type: RelType,
+    pub r#type: RelocationType,
     pub sym: u32,
     pub addend: Addr,
 }
@@ -21,7 +21,7 @@ impl Rela {
 
     pub fn parse(i: parse::Input) -> parse::Result<Self> {
         map(
-            tuple((Addr::parse, RelType::parse, le_u32, Addr::parse)),
+            tuple((Addr::parse, RelocationType::parse, le_u32, Addr::parse)),
             |(offset, r#type, sym, addend)| Rela {
                 offset,
                 r#type,
@@ -30,15 +30,25 @@ impl Rela {
             },
         )(i)
     }
+}
 
-    pub fn parse_rel(i: parse::Input) -> parse::Result<Self> {
+/// A relocation
+pub struct Rel {
+    pub offset: Addr,
+    pub r#type: RelocationType,
+    pub sym: u32,
+}
+
+impl Rel {
+    pub const SIZE: usize = 16;
+
+    pub fn parse(i: parse::Input) -> parse::Result<Self> {
         map(
-            tuple((Addr::parse, RelType::parse, le_u32)),
-            |(offset, r#type, sym)| Rela {
+            tuple((Addr::parse, RelocationType::parse, le_u32)),
+            |(offset, r#type, sym)| Rel {
                 offset,
                 r#type,
                 sym,
-                addend: Addr::from(0),
             },
         )(i)
     }
@@ -47,7 +57,7 @@ impl Rela {
 /// The type of a relocation
 #[repr(u32)]
 #[derive(Debug, TryFromPrimitive, Clone, Copy, PartialEq, Eq)]
-pub enum RelType {
+pub enum RelocationType {
     _64 = 1,
     Copy = 5,
     GlobDat = 6,
@@ -55,4 +65,4 @@ pub enum RelType {
     Relative = 8,
     IRelative = 37,
 }
-impl_parse_for_enum!(RelType, le_u32);
+impl_parse_for_enum!(RelocationType, le_u32);

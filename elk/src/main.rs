@@ -20,7 +20,7 @@ fn do_main() -> Result<(), Box<dyn Error>> {
 
     println!("Jumping");
     let obj = &proc.objects[exec];
-    let entry_point: delf::Addr = obj.file.entry_point + obj.base;
+    let entry_point: delf::Addr = obj.file.elf_header.entry_point + obj.base;
     unsafe { jmp(entry_point.as_ptr()) }
 
     Ok(())

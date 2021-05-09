@@ -21,11 +21,11 @@ use mmap::{MapOption, MemoryMap};
 
 use delf::{
     components::{
-        rela::{RelType, Rela},
+        rela::{RelocationType, Rela},
         segment::{DynamicTag, SegmentFlag, SegmentType},
         sym::{Sym, SymBind},
     },
-    Addr, File,
+    Addr, ParsedElf,
 };
 use multimap::MultiMap;
 
@@ -80,7 +80,7 @@ impl Process {
             .map_err(|e| LoadError::IO(path.clone(), e))?;
 
         println!("Loading {:?}", path);
-        let file = File::parse_or_print_error(&input)
+        let file = ParsedElf::parse_or_print_error(&input)
             .ok_or_else(|| LoadError::ParseError(path.clone()))?;
 
         let load_segments = || {
@@ -162,12 +162,13 @@ impl Process {
             sym_map.insert(sym.name.clone(), sym.clone());
         }
 
-        let rels = file.read_rela_entries()?;
+        let _rel = file.read_rel()?;
+        let rela = file.read_rela()?;
 
         self.objects.push(Object {
             path: path.clone(),
             base,
-            rels,
+            rels: rela,
             mem_range,
             file,
             syms,
@@ -260,7 +261,7 @@ impl Process {
     }
 
     fn apply_relocation(&self, objrel: ObjectRel) -> Result<(), RelocationError> {
-        use RelType as RT;
+        use RelocationType as RT;
 
         let ObjectRel { obj, rel } = objrel;
         let reltype = rel.r#type;
@@ -299,6 +300,14 @@ impl Process {
             RT::Copy => unsafe {
                 objrel.addr().write(found.value().as_slice(found.size()));
             },
+            RT::IRelative => unsafe {
+                let function: fn() -> *const u8 = std::mem::transmute((rel.addend + objrel.obj.base).as_ptr::<u8>());
+                println!("Writing toadd {:?}", objrel.addr());
+                function();
+                println!("a");
+                println!("Writing value {:p}", function());
+                objrel.addr().set(function() as u64);
+            },
             _ => return Err(RelocationError::UnimplementedRelocation(reltype)),
         }
         Ok(())
@@ -335,7 +344,7 @@ pub struct Object {
     pub mem_range: Range<Addr>,
 
     #[debug(skip)]
-    pub file: File,
+    pub file: ParsedElf<'static>,
     #[debug(skip)]
     pub segments: Vec<Segment>,
     #[debug(skip)]
@@ -448,7 +457,7 @@ pub enum LoadError {
 #[derive(thiserror::Error, Debug)]
 pub enum RelocationError {
     #[error("unimplemented relocation: {0:?}")]
-    UnimplementedRelocation(RelType),
+    UnimplementedRelocation(RelocationType),
     #[allow(dead_code)]
     #[error("unknown symbol number: {0}")]
     UnknownSymbolNumber(u32),
