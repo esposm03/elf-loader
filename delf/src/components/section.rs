@@ -1,6 +1,5 @@
 //! Utilities related to parsing of section headers
 
-use core::convert::TryFrom;
 use core::fmt;
 
 use derive_try_from_primitive::TryFromPrimitive;
@@ -67,6 +66,12 @@ impl<'a> SectionHeader<'a> {
         let cut_start = &self.full_input[self.off.0 as usize..];
         let cut_end = &cut_start[..self.size.0 as usize];
         Some(&cut_end[offset.0 as usize..])
+    }
+
+    pub fn data(&self) -> &'a [u8] {
+        let cut_start = &self.full_input[self.off.0 as usize..];
+        let cut_end = &cut_start[..self.size.0 as usize];
+        cut_end
     }
 }
 

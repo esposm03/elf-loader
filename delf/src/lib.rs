@@ -4,6 +4,7 @@ pub mod components;
 pub mod errors;
 pub mod parse;
 use components::{
+    dynamic::DynamicSection,
     rela::RelaTable,
     section::{SectionHeader, SectionType},
     segment::ProgramHeader,
@@ -12,7 +13,7 @@ use components::{
 };
 
 use std::fmt;
-use std::{convert::TryFrom, usize};
+use std::usize;
 
 use derive_more::*;
 use derive_try_from_primitive::TryFromPrimitive;
@@ -32,7 +33,7 @@ use nom::{
 #[derive(Debug)]
 pub struct ParsedElf<'a> {
     pub elf_header: ElfHeader,
-    pub program_headers: Vec<ProgramHeader>,
+    pub program_headers: Vec<ProgramHeader<'a>>,
     pub section_headers: Vec<SectionHeader<'a>>,
     pub full_content: &'a [u8],
 }
@@ -99,6 +100,14 @@ impl<'a> ParsedElf<'a> {
             None
         }
     }
+
+    pub fn dynamic_section(&self) -> Option<DynamicSection> {
+        self.section_headers
+            .iter()
+            .find(|sh| sh.r#type == SectionType::Dynamic)
+            .map(|sh| DynamicSection(sh, self.strtab(sh.link as usize).unwrap()))
+    }
+
 }
 
 /// The ELF header

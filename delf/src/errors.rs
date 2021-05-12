@@ -1,4 +1,4 @@
-use crate::components::segment::DynamicTag;
+use crate::components::dynamic::DynamicTag;
 
 /// An error that occurred while trying to read relocations
 #[derive(thiserror::Error, Debug)]

@@ -1,7 +1,5 @@
 //! Utilities related to parsing of relocations
 
-use std::convert::TryFrom;
-
 use derive_try_from_primitive::TryFromPrimitive;
 use nom::number::complete::le_u32;
 
