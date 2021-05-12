@@ -10,11 +10,11 @@ use nom::{
     sequence::tuple,
 };
 
-use crate::{Addr, impl_parse_for_enum, parse};
+use crate::{impl_parse_for_enum, parse, Addr};
 
 /// An header for a section
 #[derive(Debug)]
-pub struct SectionHeader {
+pub struct SectionHeader<'a> {
     pub name: Addr,
     pub r#type: SectionType,
     pub flags: u64,
@@ -25,10 +25,11 @@ pub struct SectionHeader {
     pub info: u32,
     pub addralign: Addr,
     pub entsize: Addr,
+    pub full_input: &'a [u8],
 }
 
-impl SectionHeader {
-    pub fn parse(i: parse::Input) -> parse::Result<Self> {
+impl<'a> SectionHeader<'a> {
+    pub fn parse(full_input: &'a [u8], i: parse::Input<'a>) -> parse::Result<'a, Self> {
         let (i, (name, r#type, flags, addr, off, size, link, info, addralign, entsize)) =
             tuple((
                 map(le_u32, |x| Addr(x as u64)),
@@ -53,8 +54,19 @@ impl SectionHeader {
             info,
             addralign,
             entsize,
+            full_input,
         };
         Ok((i, res))
+    }
+
+    pub fn data_at(&self, offset: Addr) -> Option<&'a [u8]> {
+        if offset >= self.size {
+            return None;
+        }
+
+        let cut_start = &self.full_input[self.off.0 as usize..];
+        let cut_end = &cut_start[..self.size.0 as usize];
+        Some(&cut_end[offset.0 as usize..])
     }
 }
 

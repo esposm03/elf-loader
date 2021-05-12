@@ -1,13 +1,14 @@
 //! Parsing Elf files
 
 pub mod components;
+pub mod errors;
 pub mod parse;
 use components::{
-    rela::Rela,
+    rela::RelaTable,
     section::{SectionHeader, SectionType},
-    segment::{DynamicEntry, DynamicTag, ProgramHeader, SegmentContents, SegmentType},
+    segment::ProgramHeader,
     strtab::StrTab,
-    sym::Sym,
+    sym::SymTab,
 };
 
 use std::fmt;
@@ -21,25 +22,19 @@ use nom::{
     bytes::complete::{tag, take},
     combinator::{map, verify},
     error::context,
-    multi::many_m_n,
     number::complete::{le_u16, le_u32, le_u64},
     sequence::tuple,
     Err::{Error, Failure},
     Offset,
 };
 
-use crate::components::rela::Rel;
-
 /// An ELF file
 #[derive(Debug)]
 pub struct ParsedElf<'a> {
     pub elf_header: ElfHeader,
     pub program_headers: Vec<ProgramHeader>,
-    pub section_headers: Vec<SectionHeader>,
+    pub section_headers: Vec<SectionHeader<'a>>,
     pub full_content: &'a [u8],
-
-    pub shstrtab: StrTab<'a>,
-    pub strtab: StrTab<'a>,
 }
 
 impl<'a> ParsedElf<'a> {
@@ -47,39 +42,17 @@ impl<'a> ParsedElf<'a> {
     pub fn parse(input: parse::Input<'a>) -> parse::Result<Self> {
         let (i, (elf_header, program_headers, section_headers)) = ElfHeader::parse(input)?;
 
-        let shstrtab = {
-            let sh = &section_headers[elf_header.sh_nidx];
-            let data = &input[sh.off.0 as usize..][..sh.size.0 as usize];
-            StrTab::new_borrowed(data)
-        };
-
-        let strtab = {
-            let sh = section_headers
-                .iter()
-                .find(|&sh| {
-                    sh.r#type == SectionType::StrTab
-                        && shstrtab.at(sh.name) == Some(".strtab".into())
-                })
-                .expect("Binary doesn't contain `.strtab` section");
-
-            let data = &input[sh.off.0 as usize..][..sh.size.0 as usize];
-            StrTab::new_borrowed(data)
-        };
-
         let res = Self {
             elf_header,
             program_headers,
             section_headers,
             full_content: input,
-
-            shstrtab,
-            strtab,
         };
         Ok((i, res))
     }
 
     /// Parse an Elf file, or report a (somewhat) user-friendly error
-    pub fn parse_or_print_error(i: parse::Input<'a>) -> Option<Self> {
+    pub fn parse_or_print_error(i: &'a [u8]) -> Option<Self> {
         match Self::parse(i) {
             Ok((_, file)) => Some(file),
             Err(Failure(err)) | Err(Error(err)) => {
@@ -95,123 +68,36 @@ impl<'a> ParsedElf<'a> {
         }
     }
 
-    /// Return the program header whose segment contains the given address
-    pub fn segment_at(&self, addr: Addr) -> Option<&ProgramHeader> {
-        self.program_headers
-            .iter()
-            .filter(|ph| ph.typ == SegmentType::Load)
-            .find(|ph| ph.mem_range().contains(&addr))
-    }
-
-    /// Take a slice of data from the given address until the end of its segment
-    pub fn mem_slice_at(&self, addr: Addr) -> Option<&[u8]> {
-        self.segment_at(addr)
-            .map(|seg| &seg.data[(addr - seg.mem_range().start).into()..])
-    }
-
-    /// Take a slice of data from the given address until the end of its segment
-    pub fn file_slice_at(&self, addr: Addr) -> Option<&[u8]> {
-        self.full_content.get(addr.0 as usize..)
-    }
-
-    /// Read the `Rel` table
-    pub fn read_rel(&self) -> Result<Vec<Rel>, ReadRelaError> {
-        let sh = self
-            .section_with_type(SectionType::Rel)
-            .ok_or(ReadRelaError::RelSegmentNotFound)?;
-
-        let i = &self.full_content[sh.off.0 as usize..][..sh.size.0 as usize];
-
-        let n: usize = i.len() / 16; // A `Rel` occupies 16 bytes
-        match nom::multi::many_m_n(n, n, Rel::parse)(i) {
-            Ok((_, rela_entries)) => Ok(rela_entries),
-            Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
-                Err(ReadRelaError::ParsingError(format!("{:?}", err)))
-            }
-            _ => unreachable!(),
+    pub fn strtab(&self, index: usize) -> Option<StrTab> {
+        if self.section_headers[index].r#type == SectionType::StrTab {
+            Some(StrTab(&self.section_headers[index]))
+        } else {
+            None
         }
     }
 
-    /// Read the `Rela` table
-    pub fn read_rela(&self) -> Result<Vec<Rela>, ReadRelaError> {
-        let sh = self
-            .section_with_type(SectionType::Rela)
-            .ok_or(ReadRelaError::RelaSegmentNotFound)?;
-
-        let i = &self.full_content[sh.off.0 as usize..][..sh.size.0 as usize];
-
-        let n: usize = i.len() / 24; // A `Rela` occupies 24 bytes
-        match nom::multi::many_m_n(n, n, Rela::parse)(i) {
-            Ok((_, rela_entries)) => Ok(rela_entries),
-            Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
-                Err(ReadRelaError::ParsingError(format!("{:?}", err)))
-            }
-            _ => unreachable!(),
+    pub fn symtab(&self, index: usize) -> Option<SymTab> {
+        if let SectionType::SymTab | SectionType::DynSym = self.section_headers[index].r#type {
+            let symtab = &self.section_headers[index];
+            let strtab = self
+                .strtab(self.section_headers[index].link as usize)
+                .unwrap();
+            Some(SymTab(symtab, strtab))
+        } else {
+            None
         }
     }
 
-    /// Return the first program header whose segment has the specified type
-    pub fn segment_of_type(&self, typ: SegmentType) -> Option<&ProgramHeader> {
-        self.program_headers.iter().find(|ph| ph.typ == typ)
-    }
-
-    /// Get the dynamic table of this ELF file
-    pub fn dynamic_table(&self) -> Option<&[DynamicEntry]> {
-        match self.segment_of_type(SegmentType::Dynamic) {
-            Some(ProgramHeader {
-                contents: SegmentContents::Dynamic(entries),
-                ..
-            }) => Some(entries),
-            _ => None,
+    pub fn rela(&self, index: usize) -> Option<RelaTable> {
+        let sh = &self.section_headers[index];
+        if let SectionType::Rela = sh.r#type {
+            Some(RelaTable(
+                &self.section_headers[index],
+                self.symtab(sh.link as usize)?,
+            ))
+        } else {
+            None
         }
-    }
-
-    /// Return an iterator over the addresses dynamic entries
-    pub fn dynamic_entries(&self, tag: DynamicTag) -> impl Iterator<Item = Addr> + '_ {
-        self.dynamic_table()
-            .unwrap_or_default()
-            .iter()
-            .filter(move |e| e.tag == tag)
-            .map(|e| e.addr)
-    }
-
-    /// Return the dynamic entry with the given type
-    fn dynamic_entry(&self, tag: DynamicTag) -> Option<Addr> {
-        self.dynamic_entries(tag).next()
-    }
-
-    /// Return the dynamic entry with the given type
-    ///
-    /// NOTE: This silently drops any string it can't read
-    pub fn dynamic_entry_strings(&self, tag: DynamicTag) -> impl Iterator<Item = String> + '_ {
-        self.dynamic_entries(tag)
-            .filter_map(move |addr| self.strtab.at(addr))
-    }
-
-    pub fn section_with_type(&self, typ: SectionType) -> Option<&SectionHeader> {
-        self.section_headers.iter().find(|&sh| sh.r#type == typ)
-    }
-
-    /// Return a `Vec` of the symbols defined in this file
-    pub fn read_syms(&self) -> Result<Vec<Sym>, ReadSymsError> {
-        use ReadSymsError::ParsingError;
-
-        let section = self.section_with_type(SectionType::SymTab).unwrap();
-        let i = self.file_slice_at(section.off).unwrap();
-        let n = (section.size.0 / section.entsize.0) as usize;
-
-        match many_m_n(n, n, Sym::parse)(i) {
-            Ok((_, syms)) => Ok(syms),
-            Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
-                Err(ParsingError(format!("{:?}", err)))
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn get_dynamic_entry(&self, tag: DynamicTag) -> Result<Addr, GetDynamicEntryError> {
-        self.dynamic_entry(tag)
-            .ok_or(GetDynamicEntryError::NotFound(tag))
     }
 }
 
@@ -276,7 +162,7 @@ impl ElfHeader {
         let sh_slices = (&full_input[sh_offset.into()..]).chunks(sh_entsize);
         let mut section_headers = Vec::new();
         for sh_slice in sh_slices.take(sh_count) {
-            let (_, sh) = SectionHeader::parse(sh_slice)?;
+            let (_, sh) = SectionHeader::parse(full_input, sh_slice)?;
             section_headers.push(sh);
         }
 
@@ -296,49 +182,6 @@ impl ElfHeader {
         };
         Ok((i, (file_header, program_headers, section_headers)))
     }
-}
-
-/// An error that occurred while trying to read relocations
-#[derive(thiserror::Error, Debug)]
-pub enum ReadRelaError {
-    #[error("{0}")]
-    DynamicEntryNotFound(#[from] GetDynamicEntryError),
-    #[error("Object file does not contain a `SHT_RELA` section")]
-    RelaSegmentNotFound,
-    #[error("Object file does not contain a `SHT_REL` section")]
-    RelSegmentNotFound,
-    #[error("Parsing error: {0}")]
-    ParsingError(String),
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum GetDynamicEntryError {
-    #[error("Dynamic entry {0:?} not found")]
-    NotFound(DynamicTag),
-}
-
-/// An error that occurred while trying to read strings from the file
-#[derive(thiserror::Error, Debug)]
-pub enum GetStringError {
-    #[error("StrTab dynamic entry not found")]
-    StrTabNotFound,
-    #[error("StrTab segment not found")]
-    StrTabSegmentNotFound,
-    #[error("String not found")]
-    StringNotFound,
-}
-
-/// An error that occurred while trying to read symbols
-#[derive(thiserror::Error, Debug)]
-pub enum ReadSymsError {
-    #[error("{0}")]
-    DynamicEntryNotFound(#[from] GetDynamicEntryError),
-    #[error("SymTab section not found")]
-    SymTabSectionNotFound,
-    #[error("SymTab segment not found")]
-    SymTabSegmentNotFound,
-    #[error("Parsing error: {0}")]
-    ParsingError(String),
 }
 
 /// The type of an ELF file

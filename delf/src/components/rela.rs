@@ -3,54 +3,80 @@
 use std::convert::TryFrom;
 
 use derive_try_from_primitive::TryFromPrimitive;
-use nom::{combinator::map, number::complete::le_u32, sequence::tuple};
+use nom::number::complete::le_u32;
 
-use crate::{Addr, impl_parse_for_enum, parse};
+use crate::{impl_parse_for_enum, parse, Addr};
 
-/// A relocation
-#[derive(Debug)]
-pub struct Rela {
-    pub offset: Addr,
-    pub r#type: RelocationType,
-    pub sym: u32,
-    pub addend: Addr,
-}
+use super::{
+    section::SectionHeader,
+    sym::{Sym, SymTab},
+};
 
-impl Rela {
-    pub const SIZE: usize = 24;
+pub struct RelaTable<'a>(pub &'a SectionHeader<'a>, pub SymTab<'a>);
 
-    pub fn parse(i: parse::Input) -> parse::Result<Self> {
-        map(
-            tuple((Addr::parse, RelocationType::parse, le_u32, Addr::parse)),
-            |(offset, r#type, sym, addend)| Rela {
-                offset,
-                r#type,
-                sym,
-                addend,
-            },
-        )(i)
+impl<'a> RelaTable<'a> {
+    pub fn rela_index(&'a self, index: usize) -> Option<Rela> {
+        let size = (Rela::SIZE * index) as u64;
+
+        let data = self.0.data_at(Addr(size))?;
+        let rela = Rela::parse(data, &self.1).ok()?.1;
+
+        Some(rela)
     }
 }
 
 /// A relocation
-pub struct Rel {
+#[derive(Debug, Clone)]
+pub struct Rela<'a> {
     pub offset: Addr,
-    pub r#type: RelocationType,
-    pub sym: u32,
+    pub typ: RelocationType,
+    pub sym: Sym<'a>,
+    pub addend: Addr,
 }
 
-impl Rel {
+impl<'a> Rela<'a> {
+    pub const SIZE: usize = 24;
+
+    pub fn parse(i: parse::Input<'a>, symtab: &'a SymTab<'a>) -> parse::Result<'a, Self> {
+        let (i, offset) = Addr::parse(i)?;
+        let (i, typ) = RelocationType::parse(i)?;
+        let (i, sym) = le_u32(i)?;
+        let (i, addend) = Addr::parse(i)?;
+
+        let sym = symtab
+            .sym_index(sym as usize)
+            .expect("Symbol index not found");
+        Ok((
+            i,
+            Rela {
+                offset,
+                typ,
+                sym,
+                addend,
+            },
+        ))
+    }
+}
+
+/// A relocation
+#[derive(Debug)]
+pub struct Rel<'a> {
+    pub offset: Addr,
+    pub typ: RelocationType,
+    pub sym: Sym<'a>,
+}
+
+impl<'a> Rel<'a> {
     pub const SIZE: usize = 16;
 
-    pub fn parse(i: parse::Input) -> parse::Result<Self> {
-        map(
-            tuple((Addr::parse, RelocationType::parse, le_u32)),
-            |(offset, r#type, sym)| Rel {
-                offset,
-                r#type,
-                sym,
-            },
-        )(i)
+    pub fn parse(i: parse::Input<'a>, symtab: &'a SymTab) -> parse::Result<'a, Self> {
+        let (i, offset) = Addr::parse(i)?;
+        let (i, typ) = RelocationType::parse(i)?;
+        let (i, sym) = le_u32(i)?;
+
+        let sym = symtab.sym_index(sym as usize).unwrap();
+
+        Ok((i, Rel { offset, typ, sym }))
     }
 }
 

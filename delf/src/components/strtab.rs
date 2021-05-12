@@ -2,26 +2,21 @@ use std::borrow::Cow;
 
 use crate::Addr;
 
+use super::section::SectionHeader;
+
+/// A section whose content is to be interpreted as a symbol table
+///
+/// An instance can be constructed with [`crate::ParsedElf::strtab`]
 #[derive(Debug)]
-pub struct StrTab<'a>(Cow<'a, [u8]>);
+pub struct StrTab<'a>(pub &'a SectionHeader<'a>);
 
 impl<'a> StrTab<'a> {
-    /// Create a new `StrTab` with owned data
-    pub fn new(data: Vec<u8>) -> Self {
-        StrTab(Cow::from(data))
-    }
-
-    /// Create a new `StrTab` with borrowed data
-    pub fn new_borrowed(data: &'a [u8]) -> Self {
-        StrTab(Cow::Borrowed(data))
-    }
-
     /// Read the string at the given offset
-    pub fn at(&self, offset: Addr) -> Option<String> {
+    pub fn at(&self, offset: Addr) -> Option<Cow<str>> {
         self.0
-            .get(offset.0 as usize..)?
+            .data_at(offset)?
             .split(|&i| i == 0)
             .next()
-            .map(|string| String::from_utf8_lossy(string).to_string())
+            .map(|string| String::from_utf8_lossy(string))
     }
 }

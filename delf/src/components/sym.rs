@@ -1,5 +1,7 @@
 //! Utilities related to parsing of the symbol table
 
+use std::borrow::Cow;
+
 use derive_try_from_primitive::TryFromPrimitive;
 use nom::{
     combinator::map,
@@ -9,7 +11,20 @@ use nom::{
 
 use crate::{impl_parse_for_bitenum, parse, Addr};
 
-use super::section::SectionIndex;
+use super::{
+    section::{SectionHeader, SectionIndex},
+    strtab::StrTab,
+};
+
+pub struct SymTab<'a>(pub &'a SectionHeader<'a>, pub StrTab<'a>);
+
+impl<'a> SymTab<'a> {
+    pub fn sym_index(&self, index: usize) -> Option<Sym> {
+        let data = self.0.data_at(Addr((24 * index) as _))?;
+        let sym = Sym::parse(&self.1, data).ok()?;
+        Some(sym.1)
+    }
+}
 
 /// The bind of a symbol (local, global, weak)
 #[derive(Debug, TryFromPrimitive, Clone, Copy)]
@@ -37,8 +52,8 @@ impl_parse_for_bitenum!(SymType, 4_usize);
 
 /// A symbol
 #[derive(Clone, Debug)]
-pub struct Sym {
-    pub name: Addr,
+pub struct Sym<'a> {
+    pub name: Cow<'a, str>,
     pub bind: SymBind,
     pub r#type: SymType,
     pub shndx: SectionIndex,
@@ -46,8 +61,8 @@ pub struct Sym {
     pub size: u64,
 }
 
-impl Sym {
-    pub fn parse(i: parse::Input) -> parse::Result<Self> {
+impl<'a> Sym<'a> {
+    pub fn parse(strtab: &'a StrTab, i: &'a [u8]) -> parse::Result<'a, Self> {
         use nom::bits::bits;
 
         let (i, (name, (bind, r#type), _reserved, shndx, value, size)) = tuple((
@@ -58,6 +73,8 @@ impl Sym {
             Addr::parse,
             le_u64,
         ))(i)?;
+        let name = strtab.at(name).unwrap();
+
         let res = Self {
             name,
             bind,
