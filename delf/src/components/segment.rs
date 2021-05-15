@@ -13,6 +13,7 @@ use super::dynamic::DynamicEntry;
 /// The program headers are parts of an ELF file useful when executing it.
 /// In a file, there are generally many, each of them referring to a "segment"
 /// (some data in the file and, if the segment is `Load`, in memory)
+#[derive(Clone)]
 pub struct ProgramHeader<'a> {
     pub typ: SegmentType,
     pub flags: BitFlags<SegmentFlag>,
@@ -142,6 +143,7 @@ pub enum SegmentType {
 }
 
 /// The contents of a segment
+#[derive(Debug, Clone)]
 pub enum SegmentContents<'a> {
     /// The segment contains an array of dynamic entries
     Dynamic(Vec<DynamicEntry<'a>>),

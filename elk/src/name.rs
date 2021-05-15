@@ -26,6 +26,7 @@ impl Name {
         Self::FromAddr { addr, len }
     }
 
+    #[allow(dead_code)]
     pub fn owned<T: Into<Vec<u8>>>(value: T) -> Self {
         Self::Owned(value.into())
     }

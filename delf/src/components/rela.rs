@@ -14,12 +14,23 @@ pub struct RelaTable<'a>(pub &'a SectionHeader<'a>, pub SymTab<'a>);
 
 impl<'a> RelaTable<'a> {
     pub fn rela_index(&'a self, index: usize) -> Option<Rela> {
-        let size = (Rela::SIZE * index) as u64;
+        let pos = (Rela::SIZE * index) as u64;
 
-        let data = self.0.data_at(Addr(size))?;
+        let data = self.0.data_at(Addr(pos))?;
         let rela = Rela::parse(data, &self.1).ok()?.1;
 
         Some(rela)
+    }
+
+    pub fn iter(&'a self) -> impl Iterator<Item = Rela<'a>> {
+        (0..self.0.data().len() / Rela::SIZE)
+            .map(|i| Rela::SIZE * i)
+            .map(move |i| {
+                let data = self.0.data();
+                &data[i..Rela::SIZE + i]
+            })
+            .flat_map(move |slice| Rela::parse(slice, &self.1))
+            .map(|(_, rela)| rela)
     }
 }
 

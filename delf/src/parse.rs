@@ -10,8 +10,8 @@ macro_rules! impl_parse_for_enum {
     ($type: ident, $number_parser: ident) => {
         impl $type {
             pub fn parse(full_input: parse::Input) -> parse::Result<Self> {
-                use std::convert::TryFrom;
                 use nom::number::complete::$number_parser;
+                use std::convert::TryFrom;
                 let (i, val) = $number_parser(full_input)?;
                 match Self::try_from(val) {
                     Ok(val) => Ok((i, val)),

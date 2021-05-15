@@ -30,7 +30,7 @@ use nom::{
 };
 
 /// An ELF file
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParsedElf<'a> {
     pub elf_header: ElfHeader,
     pub program_headers: Vec<ProgramHeader<'a>>,
@@ -69,8 +69,16 @@ impl<'a> ParsedElf<'a> {
         }
     }
 
+    pub fn section_with_type(&self, typ: SectionType) -> Option<usize> {
+        self.section_headers
+            .iter()
+            .enumerate()
+            .find(|(_, sh)| sh.typ == typ)
+            .map(|(i, _)| i)
+    }
+
     pub fn strtab(&self, index: usize) -> Option<StrTab> {
-        if self.section_headers[index].r#type == SectionType::StrTab {
+        if self.section_headers[index].typ == SectionType::StrTab {
             Some(StrTab(&self.section_headers[index]))
         } else {
             None
@@ -78,7 +86,7 @@ impl<'a> ParsedElf<'a> {
     }
 
     pub fn symtab(&self, index: usize) -> Option<SymTab> {
-        if let SectionType::SymTab | SectionType::DynSym = self.section_headers[index].r#type {
+        if let SectionType::SymTab | SectionType::DynSym = self.section_headers[index].typ {
             let symtab = &self.section_headers[index];
             let strtab = self
                 .strtab(self.section_headers[index].link as usize)
@@ -91,7 +99,7 @@ impl<'a> ParsedElf<'a> {
 
     pub fn rela(&self, index: usize) -> Option<RelaTable> {
         let sh = &self.section_headers[index];
-        if let SectionType::Rela = sh.r#type {
+        if let SectionType::Rela = sh.typ {
             Some(RelaTable(
                 &self.section_headers[index],
                 self.symtab(sh.link as usize)?,
@@ -104,14 +112,13 @@ impl<'a> ParsedElf<'a> {
     pub fn dynamic_section(&self) -> Option<DynamicSection> {
         self.section_headers
             .iter()
-            .find(|sh| sh.r#type == SectionType::Dynamic)
+            .find(|sh| sh.typ == SectionType::Dynamic)
             .map(|sh| DynamicSection(sh, self.strtab(sh.link as usize).unwrap()))
     }
-
 }
 
 /// The ELF header
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ElfHeader {
     pub typ: ElfType,
     pub machine: Machine,

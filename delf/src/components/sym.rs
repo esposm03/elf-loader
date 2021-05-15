@@ -24,6 +24,15 @@ impl<'a> SymTab<'a> {
         let sym = Sym::parse(&self.1, data).ok()?;
         Some(sym.1)
     }
+
+    pub fn syms(&self) -> Vec<Sym> {
+        let data = self.0.data();
+        let n = data.len() / Sym::SIZE;
+
+        let (_, res) = nom::multi::many_m_n(n, n, |i| Sym::parse(&self.1, i))(data).unwrap();
+
+        return res;
+    }
 }
 
 /// The bind of a symbol (local, global, weak)
@@ -62,6 +71,8 @@ pub struct Sym<'a> {
 }
 
 impl<'a> Sym<'a> {
+    pub const SIZE: usize = 24;
+
     pub fn parse(strtab: &'a StrTab, i: &'a [u8]) -> parse::Result<'a, Self> {
         use nom::bits::bits;
 

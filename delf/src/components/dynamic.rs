@@ -16,10 +16,14 @@ impl<'a> DynamicSection<'a> {
         let (_, entries): (_, Vec<DynamicEntry>) = map(
             many_till(
                 |i| DynamicEntry::parse(i, &self.1),
-                verify(|i| DynamicEntry::parse(i, &self.1), |e| e.tag == DynamicTag::Null),
+                verify(
+                    |i| DynamicEntry::parse(i, &self.1),
+                    |e| e.tag == DynamicTag::Null,
+                ),
             ),
             |(entries, _last)| entries,
-        )(self.0.data()).unwrap();
+        )(self.0.data())
+        .unwrap();
 
         entries.iter().find(|entry| entry.tag == typ).cloned()
     }
@@ -56,6 +60,15 @@ impl<'a> DynamicEntry<'a> {
 pub enum AddrOrString<'a> {
     Address(Addr),
     String(Cow<'a, str>),
+}
+
+impl AddrOrString<'_> {
+    pub fn unwrap_string(&self) -> &Cow<str> {
+        match self {
+            Self::String(i) => i,
+            Self::Address(_) => panic!("expected a string but got an address"),
+        }
+    }
 }
 
 /// The tag of a dynamic entry

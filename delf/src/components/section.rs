@@ -12,10 +12,10 @@ use nom::{
 use crate::{impl_parse_for_enum, parse, Addr};
 
 /// An header for a section
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SectionHeader<'a> {
     pub name: Addr,
-    pub r#type: SectionType,
+    pub typ: SectionType,
     pub flags: u64,
     pub addr: Addr,
     pub off: Addr,
@@ -44,7 +44,7 @@ impl<'a> SectionHeader<'a> {
             ))(i)?;
         let res = Self {
             name,
-            r#type,
+            typ: r#type,
             flags,
             addr,
             off,
@@ -116,6 +116,7 @@ pub enum SectionType {
     SymTab = 2,
     StrTab = 3,
     Rela = 4,
+    Hash = 5,
     Dynamic = 6,
     Note = 7,
     NoBits = 8,

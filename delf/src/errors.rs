@@ -5,6 +5,8 @@ use crate::components::dynamic::DynamicTag;
 pub enum ReadRelaError {
     #[error("{0}")]
     DynamicEntryNotFound(#[from] GetDynamicEntryError),
+    #[error("Dynamic section not found")]
+    DynamicSectionNotFound,
     #[error("Object file does not contain a `SHT_RELA` section")]
     RelaSegmentNotFound,
     #[error("Object file does not contain a `SHT_REL` section")]

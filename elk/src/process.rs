@@ -1,11 +1,14 @@
 //! Loading of ELF objects, with dependencies
 
-use crate::name::Name;
+use delf::{
+    components::{dynamic::DynamicTag, section::SectionType},
+    errors::{ReadRelaError, ReadSymsError},
+};
 
-use std::mem;
 use std::{
     cmp::{max, min},
     collections::HashMap,
+    mem,
     ops::Range,
 };
 use std::{
@@ -21,13 +24,12 @@ use mmap::{MapOption, MemoryMap};
 
 use delf::{
     components::{
-        rela::{RelocationType, Rela},
-        segment::{DynamicTag, SegmentFlag, SegmentType},
-        sym::{Sym, SymBind},
+        rela::{Rela, RelocationType},
+        segment::{SegmentFlag, SegmentType},
+        sym::Sym,
     },
     Addr, ParsedElf,
 };
-use multimap::MultiMap;
 
 /// An executable process in memory
 ///
@@ -43,15 +45,17 @@ pub struct Process {
     pub objects: Vec<Object>,
     pub search_path: Vec<PathBuf>,
     pub objects_by_path: HashMap<PathBuf, usize>,
+    pub files: Vec<Vec<u8>>,
 }
 
-impl Process {
+impl<'a> Process {
     /// Create a new, empty [`Process`]
     pub fn new() -> Self {
         Self {
             objects: vec![],
             search_path: vec!["/usr/lib".into()],
             objects_by_path: HashMap::new(),
+            files: vec![],
         }
     }
 
@@ -73,14 +77,14 @@ impl Process {
             .to_str()
             .ok_or_else(|| LoadError::InvalidPath(path.clone()))?;
 
-        let mut input = vec![];
+        let mut input = Box::leak(Box::default());
         let mut fs_file: _ = fs::File::open(&path).map_err(|e| LoadError::IO(path.clone(), e))?;
         fs_file
             .read_to_end(&mut input)
             .map_err(|e| LoadError::IO(path.clone(), e))?;
 
         println!("Loading {:?}", path);
-        let file = ParsedElf::parse_or_print_error(&input)
+        let file = ParsedElf::parse_or_print_error(input)
             .ok_or_else(|| LoadError::ParseError(path.clone()))?;
 
         let load_segments = || {
@@ -90,13 +94,19 @@ impl Process {
         };
 
         // Add `DT_RUNPATH` members to the search path
-        file.dynamic_entry_strings(DynamicTag::Runpath)
+        let _ = file
+            .dynamic_section()
+            .map(|sect| Box::leak(Box::new(sect)).entry_with_tag(DynamicTag::RPath))
+            .flatten()
+            .map(|entry| Box::leak(Box::new(entry.addr)).unwrap_string())
             .map(|path| path.replace("$ORIGIN", &origin))
             .map(|path| path.split(":").map(|i| i.to_string()).collect::<Vec<_>>())
-            .flatten()
-            .filter(|i| !i.contains("/nix/store"))
-            .map(PathBuf::from)
-            .for_each(|rpath| self.search_path.push(rpath));
+            .map(|strs| {
+                strs.iter()
+                    .filter(|i| !i.contains("/nix/store"))
+                    .map(PathBuf::from)
+                    .for_each(|rpath| self.search_path.push(rpath))
+            });
 
         let mem_range = load_segments()
             .map(|ph| ph.mem_range())
@@ -110,6 +120,7 @@ impl Process {
         let mem_map = MemoryMap::new(mem_size, &[MapOption::MapWritable, MapOption::MapReadable])?;
         let base = Addr(mem_map.data() as _);
         mem::forget(mem_map); // Forget the mapping, so it doesn't get dropped
+        println!("Base {:?}", base);
 
         let segments = load_segments()
             .filter(|&ph| ph.memsz.0 > 0)
@@ -148,31 +159,25 @@ impl Process {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let syms = file.read_syms()?;
-        let syms: Vec<_> = syms
-            .into_iter()
-            .map(|sym| {
-                let name = Name::owned(file.strtab.at(sym.name).expect("No symbol name").as_bytes());
-                NamedSym { sym, name }
-            })
-            .collect();
+        // let syms = file.read_syms()?;
+        // let syms: Vec<_> = syms
+        // .into_iter()
+        // .map(|sym| {
+        // let name = Name::owned(file.strtab.at(sym.name).expect("No symbol name").as_bytes());
+        // NamedSym { sym, name }
+        // })
+        // .collect();
 
-        let mut sym_map = MultiMap::new();
-        for sym in &syms {
-            sym_map.insert(sym.name.clone(), sym.clone());
-        }
-
-        let _rel = file.read_rel()?;
-        let rela = file.read_rela()?;
+        // let sym_map = MultiMap::new();
+        // for sym in &syms {
+        //    sym_map.insert(sym.name.clone(), sym.clone());
+        // }
 
         self.objects.push(Object {
             path: path.clone(),
             base,
-            rels: rela,
             mem_range,
             file,
-            syms,
-            sym_map,
             segments,
         });
 
@@ -192,8 +197,13 @@ impl Process {
             use DynamicTag::Needed;
             a = a
                 .into_iter()
-                .map(|index| &self.objects[index].file)
-                .flat_map(|file| file.dynamic_entry_strings(Needed))
+                .map(|index| self.objects[index].file.clone())
+                .flat_map(|file| {
+                    let file = Box::leak(Box::new(file));
+                    let dyn_sect = Box::leak(Box::new(file.dynamic_section()?));
+                    let dyn_entry = Box::leak(Box::new(dyn_sect.entry_with_tag(Needed)?));
+                    Some(dyn_entry.addr.unwrap_string())
+                })
                 .collect::<Vec<_>>()
                 .into_iter()
                 .map(|dep| self.get_object(&dep))
@@ -215,22 +225,6 @@ impl Process {
             .ok_or_else(|| LoadError::NotFound(name.into()))
     }
 
-    /// Find a symbol by name, optionally excluding an object from the search
-    fn lookup_symbol(&self, wanted: &ObjectSym, ignore_self: bool) -> ResolvedSym {
-        for obj in &self.objects {
-            if ignore_self && std::ptr::eq(wanted.obj, obj) {
-                continue;
-            }
-
-            if let Some(syms) = obj.sym_map.get_vec(&wanted.sym.name) {
-                if let Some(sym) = syms.iter().find(|sym| !sym.sym.shndx.is_undef()) {
-                    return ResolvedSym::Defined(ObjectSym { obj, sym });
-                }
-            }
-        }
-        ResolvedSym::Undefined
-    }
-
     /// Retrieve an object by name
     ///
     /// This method gives a `Cached(obj)` if the object was
@@ -244,13 +238,42 @@ impl Process {
             .unwrap_or_else(|| self.load_object(path).map(GetResult::Fresh))
     }
 
+    /// Lookup a symbol from the ones defined in the process
+    pub fn lookup_symbol(&self, name: &str) -> Option<(&Object, Sym)> {
+        print!("Looking up symbol {}... ", name);
+        for obj in self.objects.iter().rev() {
+            let symtab_index = obj.file.section_with_type(SectionType::SymTab)?;
+            let symtab = Box::leak(Box::new(obj.file.symtab(symtab_index)?));
+
+            for sym in symtab.syms() {
+                if sym.name == name {
+                    println!(
+                        "found in object {:?} with val {}",
+                        obj.path.file_name().unwrap(),
+                        sym.value
+                    );
+                    return Some((obj, sym.clone()));
+                }
+            }
+        }
+        None
+    }
+
     /// Apply all the relocations of this process
     pub fn apply_relocations(&self) -> Result<(), RelocationError> {
         let rels: Vec<_> = self
             .objects
             .iter()
             .rev()
-            .map(|obj| obj.rels.iter().map(move |rel| ObjectRel { obj, rel }))
+            .flat_map(|obj| {
+                let rela_table_index = obj.file.section_with_type(SectionType::Rela)?;
+
+                let rela_table = Box::leak(Box::new(obj.file.rela(rela_table_index)?));
+                Some(rela_table.iter().map(move |rel| ObjectRel {
+                    relobj: &obj,
+                    rel: rel.clone(),
+                }))
+            })
             .flatten()
             .collect();
 
@@ -260,52 +283,35 @@ impl Process {
         Ok(())
     }
 
+    /// Apply a single relocation
     fn apply_relocation(&self, objrel: ObjectRel) -> Result<(), RelocationError> {
         use RelocationType as RT;
 
-        let ObjectRel { obj, rel } = objrel;
-        let reltype = rel.r#type;
+        let rel = &objrel.rel;
+        let reltype = rel.typ;
         let addend = rel.addend;
 
-        let wanted = ObjectSym {
-            obj,
-            sym: &obj.syms[rel.sym as usize],
-        };
-
-        // When doing a lookup, only ignore the relocation's object if
-        // we're performing a Copy relocation.
-        let ignore_self = matches!(reltype, RT::Copy);
-
         // Perform symbol lookup early
-        let found = match rel.sym {
-            // The relocation isn't bound to any symbol, go with undef
-            0 => ResolvedSym::Undefined,
-            _ => match self.lookup_symbol(&wanted, ignore_self) {
-                ResolvedSym::Undefined => match wanted.sym.sym.bind {
-                    // Undefined symbols are fine if our local symbol is weak
-                    SymBind::Weak => ResolvedSym::Undefined,
-                    _ => return Err(RelocationError::UndefinedSymbol(format!("{:?}", wanted))),
-                },
-                x => x,
-            },
-        };
+        let (obj, found) = self
+            .lookup_symbol(rel.sym.name.as_ref())
+            .ok_or(RelocationError::UndefinedSymbol(rel.sym.name.to_string()))?;
 
         match reltype {
             RT::_64 => unsafe {
-                objrel.addr().set(found.value() + addend);
+                objrel.addr().set(found.value + obj.base + addend);
             },
             RT::Relative => unsafe {
                 objrel.addr().set(obj.base + addend);
             },
             RT::Copy => unsafe {
-                objrel.addr().write(found.value().as_slice(found.size()));
+                objrel
+                    .addr()
+                    .write((found.value + obj.base).as_slice(found.size as usize));
             },
             RT::IRelative => unsafe {
-                let function: fn() -> *const u8 = std::mem::transmute((rel.addend + objrel.obj.base).as_ptr::<u8>());
-                println!("Writing toadd {:?}", objrel.addr());
+                let function: fn() -> *const u8 =
+                    std::mem::transmute((rel.addend + objrel.relobj.base).as_ptr::<u8>());
                 function();
-                println!("a");
-                println!("Writing value {:p}", function());
                 objrel.addr().set(function() as u64);
             },
             _ => return Err(RelocationError::UnimplementedRelocation(reltype)),
@@ -347,12 +353,6 @@ pub struct Object {
     pub file: ParsedElf<'static>,
     #[debug(skip)]
     pub segments: Vec<Segment>,
-    #[debug(skip)]
-    pub syms: Vec<NamedSym>,
-    #[debug(skip)]
-    pub sym_map: MultiMap<Name, NamedSym>,
-    #[debug(skip)]
-    pub rels: Vec<Rela>,
 }
 
 /// A segment for an [`Object`]
@@ -365,55 +365,20 @@ pub struct Segment {
 }
 
 #[derive(Debug, Clone)]
-pub struct NamedSym {
-    sym: Sym,
-    name: Name,
-}
-
-#[derive(Debug, Clone)]
 pub struct ObjectSym<'a> {
     obj: &'a Object,
-    sym: &'a NamedSym,
-}
-
-impl ObjectSym<'_> {
-    fn value(&self) -> delf::Addr {
-        self.obj.base + self.sym.sym.value
-    }
+    sym: &'a Sym<'a>,
 }
 
 #[derive(Debug)]
 pub struct ObjectRel<'a> {
-    obj: &'a Object,
-    rel: &'a Rela,
+    relobj: &'a Object,
+    rel: Rela<'a>,
 }
 
 impl ObjectRel<'_> {
     fn addr(&self) -> Addr {
-        self.obj.base + self.rel.offset
-    }
-}
-
-#[derive(Debug)]
-enum ResolvedSym<'a> {
-    Defined(ObjectSym<'a>),
-    Undefined,
-}
-
-impl ResolvedSym<'_> {
-    fn value(&self) -> delf::Addr {
-        match self {
-            Self::Defined(sym) => sym.value(),
-            Self::Undefined => delf::Addr(0x0),
-        }
-    }
-
-    fn size(&self) -> usize {
-        match self {
-            // weeeeeee
-            Self::Defined(sym) => sym.sym.sym.size as usize,
-            Self::Undefined => 0,
-        }
+        self.relobj.base + self.rel.offset
     }
 }
 
@@ -449,9 +414,9 @@ pub enum LoadError {
     #[error("ELF object could not be mapped to memory: {0}")]
     MapError(#[from] mmap::MapError),
     #[error("Could not read symbols from ELF object: {0}")]
-    ReadSymsError(#[from] delf::ReadSymsError),
+    ReadSymsError(#[from] ReadSymsError),
     #[error("Could not read relocations from ELF object: {0}")]
-    ReadRelaError(#[from] delf::ReadRelaError),
+    ReadRelaError(#[from] ReadRelaError),
 }
 
 #[derive(thiserror::Error, Debug)]
