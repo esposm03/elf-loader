@@ -287,14 +287,14 @@ impl fmt::Display for Addr {
         fmt::Debug::fmt(self, f)
     }
 }
-impl Into<u64> for Addr {
-    fn into(self) -> u64 {
-        self.0
+impl From<Addr> for u64 {
+    fn from(a: Addr) -> Self {
+        a.0
     }
 }
-impl Into<usize> for Addr {
-    fn into(self) -> usize {
-        self.0 as usize
+impl From<Addr> for usize {
+    fn from(a: Addr) -> Self {
+        a.0 as usize
     }
 }
 impl From<u64> for Addr {

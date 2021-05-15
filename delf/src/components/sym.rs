@@ -30,8 +30,7 @@ impl<'a> SymTab<'a> {
         let n = data.len() / Sym::SIZE;
 
         let (_, res) = nom::multi::many_m_n(n, n, |i| Sym::parse(&self.1, i))(data).unwrap();
-
-        return res;
+        res
     }
 }
 

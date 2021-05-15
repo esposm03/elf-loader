@@ -70,8 +70,7 @@ impl<'a> SectionHeader<'a> {
 
     pub fn data(&self) -> &'a [u8] {
         let cut_start = &self.full_input[self.off.0 as usize..];
-        let cut_end = &cut_start[..self.size.0 as usize];
-        cut_end
+        &cut_start[..self.size.0 as usize]
     }
 }
 

@@ -100,7 +100,7 @@ impl<'a> Process {
             .flatten()
             .map(|entry| Box::leak(Box::new(entry.addr)).unwrap_string())
             .map(|path| path.replace("$ORIGIN", &origin))
-            .map(|path| path.split(":").map(|i| i.to_string()).collect::<Vec<_>>())
+            .map(|path| path.split(':').map(|i| i.to_string()).collect::<Vec<_>>())
             .map(|strs| {
                 strs.iter()
                     .filter(|i| !i.contains("/nix/store"))
@@ -294,7 +294,7 @@ impl<'a> Process {
         // Perform symbol lookup early
         let (obj, found) = self
             .lookup_symbol(rel.sym.name.as_ref())
-            .ok_or(RelocationError::UndefinedSymbol(rel.sym.name.to_string()))?;
+            .ok_or_else(|| RelocationError::UndefinedSymbol(rel.sym.name.to_string()))?;
 
         match reltype {
             RT::_64 => unsafe {

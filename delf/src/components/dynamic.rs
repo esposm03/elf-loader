@@ -32,8 +32,8 @@ impl<'a> DynamicSection<'a> {
 /// A dynamic entry
 #[derive(Debug, Clone)]
 pub struct DynamicEntry<'a> {
-    pub tag: DynamicTag,
     pub addr: AddrOrString<'a>,
+    pub tag: DynamicTag,
 }
 
 impl<'a> DynamicEntry<'a> {

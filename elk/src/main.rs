@@ -27,6 +27,11 @@ fn do_main() -> Result<(), Box<dyn Error>> {
 }
 
 /// Jump to the given address
+///
+/// # Safety
+///
+/// The caller needs to ensure the address points to valid memory,
+/// with execute permissions, and which doesn't contain unsound code
 pub unsafe fn jmp(addr: *const u8) {
     let addr: fn() = std::mem::transmute(addr);
     addr();
