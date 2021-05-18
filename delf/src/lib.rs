@@ -131,7 +131,7 @@ pub struct ElfHeader {
     pub ph_count: usize,
     pub sh_entsize: usize,
     pub sh_count: usize,
-    pub sh_nidx: usize,
+    pub sh_strtab: usize,
 }
 
 impl ElfHeader {
@@ -166,7 +166,7 @@ impl ElfHeader {
         let (i, ph_count) = u16_usize(i)?;
         let (i, sh_entsize) = u16_usize(i)?;
         let (i, sh_count) = u16_usize(i)?;
-        let (i, sh_nidx) = u16_usize(i)?;
+        let (i, sh_strtab) = u16_usize(i)?;
 
         let ph_slices = full_input[ph_offset.into()..].chunks(ph_entsize);
         let mut program_headers = Vec::new();
@@ -194,7 +194,7 @@ impl ElfHeader {
             ph_count,
             sh_entsize,
             sh_count,
-            sh_nidx,
+            sh_strtab,
         };
         Ok((i, (file_header, program_headers, section_headers)))
     }

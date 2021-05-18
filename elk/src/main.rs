@@ -1,4 +1,3 @@
-pub(crate) mod name;
 mod process;
 use process::Process;
 

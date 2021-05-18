@@ -120,7 +120,6 @@ impl<'a> Process {
         let mem_map = MemoryMap::new(mem_size, &[MapOption::MapWritable, MapOption::MapReadable])?;
         let base = Addr(mem_map.data() as _);
         mem::forget(mem_map); // Forget the mapping, so it doesn't get dropped
-        println!("Base {:?}", base);
 
         let segments = load_segments()
             .filter(|&ph| ph.memsz.0 > 0)
@@ -158,20 +157,6 @@ impl<'a> Process {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-
-        // let syms = file.read_syms()?;
-        // let syms: Vec<_> = syms
-        // .into_iter()
-        // .map(|sym| {
-        // let name = Name::owned(file.strtab.at(sym.name).expect("No symbol name").as_bytes());
-        // NamedSym { sym, name }
-        // })
-        // .collect();
-
-        // let sym_map = MultiMap::new();
-        // for sym in &syms {
-        //    sym_map.insert(sym.name.clone(), sym.clone());
-        // }
 
         self.objects.push(Object {
             path: path.clone(),
@@ -240,18 +225,12 @@ impl<'a> Process {
 
     /// Lookup a symbol from the ones defined in the process
     pub fn lookup_symbol(&self, name: &str) -> Option<(&Object, Sym)> {
-        print!("Looking up symbol {}... ", name);
         for obj in self.objects.iter().rev() {
             let symtab_index = obj.file.section_with_type(SectionType::SymTab)?;
             let symtab = Box::leak(Box::new(obj.file.symtab(symtab_index)?));
 
             for sym in symtab.syms() {
                 if sym.name == name {
-                    println!(
-                        "found in object {:?} with val {}",
-                        obj.path.file_name().unwrap(),
-                        sym.value
-                    );
                     return Some((obj, sym.clone()));
                 }
             }
@@ -307,12 +286,6 @@ impl<'a> Process {
                 objrel
                     .addr()
                     .write((found.value + obj.base).as_slice(found.size as usize));
-            },
-            RT::IRelative => unsafe {
-                let function: fn() -> *const u8 =
-                    std::mem::transmute((rel.addend + objrel.relobj.base).as_ptr::<u8>());
-                function();
-                objrel.addr().set(function() as u64);
             },
             _ => return Err(RelocationError::UnimplementedRelocation(reltype)),
         }
